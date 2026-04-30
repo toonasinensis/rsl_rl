@@ -12,9 +12,8 @@ import torch
 import warnings
 from tensordict import TensorDict
 from typing import Any, Callable
-
+import copy
 import rsl_rl
-
 
 def get_param(param: Any, idx: int) -> Any:
     """Get a parameter for the given index.
@@ -172,6 +171,115 @@ def resolve_callable(callable_or_name: type | Callable | str) -> Callable:
         f"Could not resolve '{callable_or_name}'. Use qualified name like 'module.path:ClassName' "
         f"or pass the class directly."
     )
+
+
+def instantiate_from_config(
+    cfg: dict[str, Any],
+    *args: Any,
+    class_key: str = "class_name",
+    **kwargs: Any,
+) -> Any:
+    """Instantiate an object from a config dict containing a class identifier.
+
+    Example:
+        cfg = {"class_name": "GaussianDistribution", "init_std": 1.0}
+        dist = instantiate_from_config(cfg, output_dim)
+
+    Args:
+        cfg: Configuration dict with a class id under ``class_key`` and constructor kwargs.
+        *args: Positional args passed to the constructor.
+        class_key: Key in ``cfg`` that stores the class identifier.
+        **kwargs: Extra constructor kwargs that override config values.
+
+    Returns:
+        Instantiated object.
+    """
+    if class_key not in cfg:
+        raise KeyError(f"Missing '{class_key}' in config: {cfg}")
+    cfg_copy = cfg.copy()
+    cls = resolve_callable(cfg_copy.pop(class_key))
+    return cls(*args, **cfg_copy, **kwargs)
+
+
+def resolve_actor_backbone_output_dim(num_actions: int, distribution_cfg: dict) -> int | list[int]:
+    """Resolve actor backbone output size from distribution configuration."""
+    dist = instantiate_from_config(distribution_cfg, num_actions)
+    return dist.input_dim
+
+
+def _resolve_class_or_raise(class_name: str, where: str) -> type:
+    """Resolve a class name and raise a contextual error if it cannot be resolved."""
+    try:
+        resolved = resolve_callable(class_name)
+    except Exception as exc:
+        raise ValueError(f"Invalid class string at {where}: '{class_name}'.") from exc
+
+    if not isinstance(resolved, type):
+        raise ValueError(f"Resolved object at {where} is not a class: '{class_name}'.")
+    return resolved
+
+
+def construct_actor_with_shell(
+    obs: TensorDict,
+    obs_groups: dict[str, list[str]],
+    cfg: dict,
+    num_actions: int,
+) -> Any:
+    """Build actor as backbone + ActorModel shell.
+
+    Supports legacy actor config (class_name as backbone) and explicit shell config.
+    """
+    actor_cfg = copy.deepcopy(cfg)
+    actor_class_name = actor_cfg.pop("class_name")
+    actor_cls = _resolve_class_or_raise(actor_class_name, "actor.class_name")
+
+    if actor_cls.__name__ == "ActorModel":
+        distribution_cfg = actor_cfg.pop("distribution_cfg", None)
+        if distribution_cfg is None:
+            raise ValueError("actor.distribution_cfg is required when actor.class_name is 'ActorModel'.")
+
+        backbone_cfg = actor_cfg.pop("backbone", None)
+        if backbone_cfg is None:
+            raise ValueError("actor.backbone is required when actor.class_name is 'ActorModel'.")
+        backbone_cfg = copy.deepcopy(backbone_cfg)
+
+        backbone_class_name = backbone_cfg.pop("class_name")
+        backbone_class = _resolve_class_or_raise(backbone_class_name, "actor.backbone.class_name")
+        backbone_output_dim = actor_cfg.pop("backbone_output_dim", None)
+        if backbone_output_dim is None:
+            backbone_output_dim = resolve_actor_backbone_output_dim(num_actions, distribution_cfg) # this
+        try:
+            backbone = backbone_class(
+                obs,
+                obs_groups,
+                "actor",
+                backbone_output_dim,
+                **backbone_cfg,
+            )
+        except TypeError:
+            backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, **backbone_cfg)
+
+        return actor_cls(backbone, num_actions, distribution_cfg=distribution_cfg)
+
+    distribution_cfg = actor_cfg.pop("distribution_cfg", None)
+    if distribution_cfg is None:
+        raise ValueError(
+            "actor.distribution_cfg is required in PPO for stochastic policy. "
+            "Set it in actor config or use actor.class_name='ActorModel' with actor.distribution_cfg."
+        )
+
+    backbone_class = actor_cls
+    backbone_output_dim = actor_cfg.pop("backbone_output_dim", None)
+    if backbone_output_dim is None:
+        backbone_output_dim = resolve_actor_backbone_output_dim(num_actions, distribution_cfg)
+
+    try:
+        backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, distribution_cfg=None, **actor_cfg)
+    except TypeError:
+        backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, **actor_cfg)
+
+    actor_model_cls = _resolve_class_or_raise("rsl_rl.models:ActorModel", "actor shell class")
+    return actor_model_cls(backbone, num_actions, distribution_cfg=distribution_cfg)
 
 
 def resolve_obs_groups(

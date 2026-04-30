@@ -48,9 +48,10 @@ class Logger:
         self.lenbuffer = deque(maxlen=100)
         self.cur_reward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.cur_episode_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.rnd_enabled = bool(self.cfg.get("algorithm", {}).get("rnd_cfg"))
 
         # Create RND buffers
-        if self.cfg["algorithm"]["rnd_cfg"]:
+        if self.rnd_enabled:
             self.erewbuffer = deque(maxlen=100)
             self.irewbuffer = deque(maxlen=100)
             self.cur_ereward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -194,10 +195,7 @@ class Logger:
 
             # Log rewards and episode length
             if len(self.rewbuffer) > 0:
-                if self.cfg["algorithm"]["rnd_cfg"]:
-                    self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(self.erewbuffer), it)
-                    self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(self.irewbuffer), it)
-                    self.writer.add_scalar("Rnd/weight", rnd_weight, it)  # type: ignore
+               
                 self.writer.add_scalar("Train/mean_reward", statistics.mean(self.rewbuffer), it)
                 self.writer.add_scalar("Train/mean_episode_length", statistics.mean(self.lenbuffer), it)
                 if self.logger_type != "wandb":
@@ -230,9 +228,7 @@ class Logger:
 
             # Print rewards and episode length
             if len(self.rewbuffer) > 0:
-                if self.cfg["algorithm"]["rnd_cfg"]:
-                    log_string += f"""{"Mean extrinsic reward:":>{pad}} {statistics.mean(self.erewbuffer):.2f}\n"""
-                    log_string += f"""{"Mean intrinsic reward:":>{pad}} {statistics.mean(self.irewbuffer):.2f}\n"""
+                
                 log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
                 log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
 
