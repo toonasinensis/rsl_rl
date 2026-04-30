@@ -9,7 +9,6 @@ from .actor_model import ActorModel
 from .cnn_model import CNNModel
 from .mlp_model import MLPModel
 from .rnn_model import RNNModel
-from .sub_encoder_model import SubEncoderMLPModel
 from .model_base import Model_Base
 from .my_model import MyModel
 from .my_mlp_model import MyMLPModel
@@ -18,7 +17,6 @@ __all__ = [
     "CNNModel",
     "MLPModel",
     "RNNModel",
-    "SubEncoderMLPModel",
     "MyModel",
     "MyMLPModel",
     "Model_Base",
