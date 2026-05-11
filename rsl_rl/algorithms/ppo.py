@@ -238,6 +238,7 @@ class PPO:
             masks=batch.masks,
             hidden_state=batch.hidden_states[0],
             stochastic_output=True,
+            train_mode=True,
         )
         actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
         values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])

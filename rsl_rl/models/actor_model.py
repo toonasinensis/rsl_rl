@@ -46,6 +46,7 @@ class ActorModel(nn.Module):
         masks: torch.Tensor | None = None,
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
+        train_mode: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Run backbone forward, update distribution, and return output dict.
 
@@ -59,7 +60,7 @@ class ActorModel(nn.Module):
             obs,
             masks=masks,
             hidden_state=hidden_state,
-            train_mode=stochastic_output,
+            train_mode=train_mode,
         )
         
         # Support both dict-returning backbones (new) and tensor-returning ones (legacy)
