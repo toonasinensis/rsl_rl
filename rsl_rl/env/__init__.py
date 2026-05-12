@@ -6,5 +6,5 @@
 """Environment definition."""
 
 from .vec_env import VecEnv
-
-__all__ = ["VecEnv"]
+from .env_wrapper import IsaaclabVecEnvWrapper
+__all__ = ["VecEnv", "IsaaclabVecEnvWrapper"]

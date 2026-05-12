@@ -33,13 +33,11 @@ class DeparseOnPolicyRunner:
         self._configure_multi_gpu()
 
         # Query observations from the environment for algorithm construction
-        _, obs_dict = self.env.get_observations() # tuple (obs_tensor, {'observations': {'policy': tensor; 'critics': tensor}})
+        obs = self.env.get_observations() # TensorDict
 
         # Create the algorithm
         alg_class: type[DeparsePPO] = resolve_callable(self.cfg["algorithm"]["class_name"])  # type: ignore
-        # import ipdb; ipdb.set_trace()
-        self.alg = alg_class.construct_algorithm(obs_dict['observations'], self.env, self.cfg, self.device)
-        # import ipdb; ipdb.set_trace()
+        self.alg = alg_class.construct_algorithm(obs, self.env, self.cfg, self.device)
 
         # Create the logger
         self.logger = Logger(
@@ -64,8 +62,7 @@ class DeparseOnPolicyRunner:
             )
 
         # Start learning
-        # obs = self.env.get_observations().to(self.device)
-        obs = self.env.get_observations()[1]["observations"]
+        obs = self.env.get_observations().to(self.device)
         self.alg.train_mode()  # switch to train mode (for dropout for example)
 
         # Ensure all parameters are in-synced
@@ -85,12 +82,9 @@ class DeparseOnPolicyRunner:
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
                     # Sample actions
-                    obs = TensorDict(obs, batch_size=[self.env.num_envs])
                     actions = self.alg.act(obs)
                     # Step the environment
-                    _, rewards, dones, extras = self.env.step(actions.to(self.env.device))
-                    obs = extras["observations"]
-                    obs = TensorDict(obs, batch_size=[self.env.num_envs])
+                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     # Check for NaN values from the environment
                     if self.cfg.get("check_for_nan", True):
                         check_nan(obs, rewards, dones)
