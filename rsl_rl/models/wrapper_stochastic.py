@@ -15,19 +15,21 @@ from rsl_rl.modules import HiddenState
 from rsl_rl.modules.distribution import Distribution
 from rsl_rl.utils import resolve_callable
 
+from .backbone_base import BaseModel
 
-class ActorModel(nn.Module):
-    """Actor shell that wraps a backbone network and a stochastic distribution head.
+
+class StochasticWrapper(nn.Module):
+    """ StochasticWrapper that wraps a backbone network and a stochastic distribution head.
 
     The backbone is responsible for producing distribution inputs (for example,
     action mean logits), while this shell owns sampling, log-probability,
     entropy, and KL-related logic.
     """
 
-    def __init__(self, backbone: nn.Module, output_dim: int, distribution_cfg: dict) -> None:
+    def __init__(self, backbone: BaseModel, output_dim: int, distribution_cfg: dict) -> None:
         super().__init__()
         if distribution_cfg is None:
-            raise ValueError("ActorModel requires 'distribution_cfg'.")
+            raise ValueError("StochasticWrapper requires 'distribution_cfg'.")
 
         dist_cfg = copy.deepcopy(distribution_cfg)
         dist_class: type[Distribution] = resolve_callable(dist_cfg.pop("class_name"))  # type: ignore
@@ -47,7 +49,7 @@ class ActorModel(nn.Module):
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
         train_mode: bool = False,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | dict]:
         """Run backbone forward, update distribution, and return output dict.
 
         Returns:
@@ -122,7 +124,7 @@ class ActorModel(nn.Module):
         """Compute KL divergence between two distribution parameterizations."""
         return self.distribution.kl_divergence(old_params, new_params)
 
-    def as_jit(self) -> nn.Module:
+    def as_jit(self):
         """Return TorchScript export module from the backbone.
 
         For current default Gaussian distributions, deterministic output is
@@ -132,7 +134,7 @@ class ActorModel(nn.Module):
             raise AttributeError("Backbone does not support JIT export via 'as_jit'.")
         return self.backbone.as_jit()
 
-    def as_onnx(self, verbose: bool) -> nn.Module:
+    def as_onnx(self, verbose: bool):
         """Return ONNX export module from the backbone.
 
         For current default Gaussian distributions, deterministic output is

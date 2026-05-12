@@ -7,6 +7,7 @@
 
 from .distillation import Distillation
 from .ppo import PPO
+from .deparse_ppo import DeparsePPO
 from .plugins import AuxLossPlugin, ObsReconstructionPlugin
 
-__all__ = ["PPO", "Distillation", "AuxLossPlugin", "ObsReconstructionPlugin"]
+__all__ = ["PPO", "Distillation", "AuxLossPlugin", "ObsReconstructionPlugin", "DeparsePPO"]

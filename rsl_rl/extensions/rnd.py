@@ -36,6 +36,7 @@ class RandomNetworkDistillation(nn.Module):
         reward_normalization: bool = False,
         device: str = "cpu",
         weight_schedule: dict | None = None,
+        learning_rate: float = 1e-3,
     ) -> None:
         """Initialize the RND module.
 
@@ -117,6 +118,9 @@ class RandomNetworkDistillation(nn.Module):
 
         # Make target network not trainable
         self.target.eval()
+
+        # Optimizer for the predictor (the target is frozen)
+        self.optimizer = torch.optim.Adam(self.predictor.parameters(), lr=learning_rate)
 
     def get_intrinsic_reward(self, obs: TensorDict) -> torch.Tensor:
         """Compute weighted intrinsic rewards from prediction error in embedding space."""

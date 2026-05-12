@@ -1,16 +1,16 @@
-from .model_base import Model_Base
+from .backbone_base import BaseModel
 
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 from rsl_rl.modules import  HiddenState
 from rsl_rl.modules import MLP
-from rsl_rl.utils import resolve_callable
 import torch.nn.functional as F
 from vector_quantize_pytorch import FSQ
 
 
-class MyModel(Model_Base):
+class BackboneFSQ(BaseModel):
+    """ FSQ model based on ModelBase """
     def __init__(
         self,
         obs: TensorDict,
@@ -88,7 +88,7 @@ class MyModel(Model_Base):
 
     def forward(
             self,
-            obs: TensorDict,
+            obs: TensorDict | dict[str, torch.Tensor],
             masks: torch.Tensor | None = None,
             hidden_state: HiddenState = None,
             train_mode: bool = False,
@@ -138,7 +138,6 @@ class MyModel(Model_Base):
                         if self.loss_cfg.get("token", 0.0) > 0.0:
                             losses[f"{k}_token"] = F.mse_loss(latents["encoder_g1"], latents["encoder_smpl"]) * self.loss_cfg["token"]
                         
-                        
                         if self.loss_cfg.get("recon", 0.0) > 0.0:
                             losses[f"{k}_recon"] = F.mse_loss(recon["g1_kin_decoder"], target) * self.loss_cfg["recon"]
                         
@@ -148,9 +147,6 @@ class MyModel(Model_Base):
                             losses[f"{k}_re_encode"] = F.mse_loss(
                                 latents_matched, latents["encoder_g1"].detach()
                             ) * self.loss_cfg["re_encode"]
-
-
-
 
                 backbone_output["aux_losses"] = losses
 

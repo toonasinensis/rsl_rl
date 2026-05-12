@@ -12,7 +12,7 @@ from itertools import chain
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
-from rsl_rl.models import ActorModel, MLPModel
+from rsl_rl.models import StochasticWrapper, BaseModel
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer, construct_actor_with_shell
 
@@ -24,16 +24,16 @@ class PPO:
         - Schulman et al. "Proximal policy optimization algorithms." arXiv preprint arXiv:1707.06347 (2017).
     """
 
-    actor: MLPModel | ActorModel
+    actor: StochasticWrapper | BaseModel
     """The actor model."""
 
-    critic: MLPModel
+    critic: BaseModel
     """The critic model."""
 
     def __init__(
         self,
-        actor: MLPModel,
-        critic: MLPModel,
+        actor: StochasticWrapper,
+        critic: BaseModel,
         storage: RolloutStorage,
         num_learning_epochs: int = 5,
         num_mini_batches: int = 4,
@@ -154,7 +154,7 @@ class PPO:
             # If we are at the last step, bootstrap the return value
             next_values = last_values if step == st.num_transitions_per_env - 1 else st.values[step + 1]
             # 1 if we are not in a terminal state, 0 otherwise
-            next_is_not_terminal = 1.0 - st.dones[step].float()
+            next_is_not_terminal = 1.0 - st.dones[step].float()  # type: ignore
             # TD error: r_t + gamma * V(s_{t+1}) - V(s_t)
             delta = st.rewards[step] + next_is_not_terminal * self.gamma * next_values - st.values[step]
             # Advantage: A(s_t, a_t) = delta_t + gamma * lambda * A(s_{t+1}, a_{t+1})
@@ -167,7 +167,9 @@ class PPO:
         if not self.normalize_advantage_per_mini_batch:
             st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
     #endregion 
-    # region resolve Loss Computation and Optimization
+
+    # TODO remains to be checked
+    #region resolve Loss Computation and Optimization
     def _register_loss_metrics(self) -> dict[str, float]:
         """Register running metric buffer for one update iteration.
 
@@ -231,7 +233,9 @@ class PPO:
         return {name: value / num_updates for name, value in metrics.items()}
     # endregion
     
-    def _forward_model(self, batch: TensorDict, original_batch_size: int) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
+    # TODO remains to be checked
+    #region model update
+    def _forward_model(self, batch: TensorDict | RolloutStorage.Batch, original_batch_size: int) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...] | dict]:
         """Run actor/critic forward pass for one mini-batch."""
         forward_dict = self.actor(
             batch.observations,
@@ -243,7 +247,7 @@ class PPO:
         actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
         values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
         distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
-        entropy = self.actor.output_entropy[:original_batch_size]
+        entropy = self.actor.output_entropy[:original_batch_size]   # type: ignore
 
         extra = forward_dict.get("extra", {}) if isinstance(forward_dict, dict) else {}
 
@@ -391,6 +395,7 @@ class PPO:
         self.storage.clear()
 
         return loss_dict
+    #endregion model update
 
     def train_mode(self) -> None:
         """Set train mode for learnable models."""
@@ -433,7 +438,7 @@ class PPO:
          
         return load_cfg.get("iteration", False)
 
-    def get_policy(self) -> MLPModel | ActorModel:
+    def get_policy(self) -> StochasticWrapper | BaseModel:
         """Get the policy model."""
         return self.actor
 
@@ -443,7 +448,7 @@ class PPO:
         """Construct the PPO algorithm."""
         # Resolve class callables
         alg_class: type[PPO] = resolve_callable(cfg["algorithm"].pop("class_name"))  # type: ignore
-        critic_class: type[MLPModel] = resolve_callable(cfg["critic"].pop("class_name"))  # type: ignore
+        critic_class: type[BaseModel] = resolve_callable(cfg["critic"].pop("class_name"))  # type: ignore
 
         # Resolve observation groups
         default_sets = ["actor", "critic"]
@@ -458,7 +463,7 @@ class PPO:
         print(f"Actor Model: {actor}")
         if cfg["algorithm"].pop("share_cnn_encoders", None):  # Share CNN encoders between actor and critic
             cfg["critic"]["cnns"] = actor.backbone.cnns  # type: ignore
-        critic: MLPModel = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
+        critic: BaseModel = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
         print(f"Critic Model: {critic}")
 
         # Initialize the storage

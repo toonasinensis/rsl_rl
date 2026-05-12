@@ -225,7 +225,7 @@ def construct_actor_with_shell(
     cfg: dict,
     num_actions: int,
 ) -> Any:
-    """Build actor as backbone + ActorModel shell.
+    """Build actor as backbone + stochastic wrapper shell.
 
     Supports legacy actor config (class_name as backbone) and explicit shell config.
     """
@@ -233,14 +233,15 @@ def construct_actor_with_shell(
     actor_class_name = actor_cfg.pop("class_name")
     actor_cls = _resolve_class_or_raise(actor_class_name, "actor.class_name")
 
-    if actor_cls.__name__ == "ActorModel":
+    wrapper_class_names = {"ActorModel", "StochasticWrapper"}
+    if actor_cls.__name__ in wrapper_class_names:
         distribution_cfg = actor_cfg.pop("distribution_cfg", None)
         if distribution_cfg is None:
-            raise ValueError("actor.distribution_cfg is required when actor.class_name is 'ActorModel'.")
+            raise ValueError("actor.distribution_cfg is required when actor.class_name is a stochastic wrapper.")
 
         backbone_cfg = actor_cfg.pop("backbone", None)
         if backbone_cfg is None:
-            raise ValueError("actor.backbone is required when actor.class_name is 'ActorModel'.")
+            raise ValueError("actor.backbone is required when actor.class_name is a stochastic wrapper.")
         backbone_cfg = copy.deepcopy(backbone_cfg)
 
         backbone_class_name = backbone_cfg.pop("class_name")
@@ -265,7 +266,7 @@ def construct_actor_with_shell(
     if distribution_cfg is None:
         raise ValueError(
             "actor.distribution_cfg is required in PPO for stochastic policy. "
-            "Set it in actor config or use actor.class_name='ActorModel' with actor.distribution_cfg."
+            "Set it in actor config or use actor.class_name='StochasticWrapper' with actor.distribution_cfg."
         )
 
     backbone_class = actor_cls
@@ -278,8 +279,11 @@ def construct_actor_with_shell(
     except TypeError:
         backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, **actor_cfg)
 
-    actor_model_cls = _resolve_class_or_raise("rsl_rl.models:ActorModel", "actor shell class")
-    return actor_model_cls(backbone, num_actions, distribution_cfg=distribution_cfg)
+    try:
+        wrapper_cls = _resolve_class_or_raise("rsl_rl.models:StochasticWrapper", "actor shell class")
+    except ValueError:
+        wrapper_cls = _resolve_class_or_raise("rsl_rl.models:ActorModel", "actor shell class")
+    return wrapper_cls(backbone, num_actions, distribution_cfg=distribution_cfg)
 
 
 def resolve_obs_groups(

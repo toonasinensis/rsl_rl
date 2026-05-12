@@ -11,14 +11,19 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from rsl_rl.modules import MLP, EmpiricalNormalization, HiddenState
-from rsl_rl.utils import resolve_callable, unpad_trajectories
+from rsl_rl.modules import EmpiricalNormalization, HiddenState
+from rsl_rl.utils import unpad_trajectories
 
 
-class Model_Base(nn.Module):
+class BaseModel(nn.Module):
+    """Add normalization layer and define functions remains to be implemented"""
+
     is_recurrent: bool = False
     """Whether the model contains a recurrent module."""
 
+    # ------------------------------------------------------------------
+    # Init and forward
+    # ------------------------------------------------------------------
     def __init__(
         self,
         obs: TensorDict,
@@ -27,9 +32,7 @@ class Model_Base(nn.Module):
         output_dim: int,
         **backbone_cfg  # 收集所有额外的关键字参数
     ) -> None:
-        
         super().__init__()
-
         # Resolve observation groups and dimensions
         self.obs_groups, self.obs_dim = self._get_obs_dim(obs, obs_groups, obs_set)
         self.output_dim = output_dim
@@ -41,8 +44,6 @@ class Model_Base(nn.Module):
         else:
             self.obs_normalizers = None  # [FIX 1] 防止 update_normalization 报 AttributeError
 
-        
-         
     def forward(
         self,
         obs: TensorDict,
@@ -56,6 +57,8 @@ class Model_Base(nn.Module):
             obs_normed = obs.clone()  # [FIX 2] 不改原始 TensorDict，避免 actor/critic 共享 obs 时互相污染
             for g in self.obs_groups:
                 obs_normed[g] = self.obs_normalizers[g](obs[g])
+        else:
+            obs_normed = obs
         return obs_normed
 
     def _compute_aux_losses(
@@ -66,17 +69,17 @@ class Model_Base(nn.Module):
         ):
         pass
 
- # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
     # Normalisation update
     # ------------------------------------------------------------------
-
     def update_normalization(self, obs: TensorDict) -> None:
         """Update per-group running normalisation statistics."""
         if self.obs_normalizers is not None:
             for g in self.obs_groups:
                 self.obs_normalizers[g].update(obs[g])
 
-    def _get_obs_dim(self, obs: TensorDict, obs_groups: dict[str, list[str]], obs_set: str) -> tuple[list[str], int]:
+    def _get_obs_dim(self, obs: TensorDict, obs_groups: dict[str, list[str]], obs_set: str) -> tuple[list[str], dict]:
         """Select active observation groups and compute observation dimension."""
         active_obs_groups = obs_groups[obs_set]
         obs_dim = {}
@@ -87,8 +90,11 @@ class Model_Base(nn.Module):
                 )
             obs_dim[obs_group] = obs[obs_group].shape[-1]
         return active_obs_groups, obs_dim
-    
 
+
+    # ------------------------------------------------------------------
+    # Synchronization
+    # ------------------------------------------------------------------
     def reset(self, dones: torch.Tensor | None = None, hidden_state: HiddenState = None) -> None:
         pass
 
@@ -97,5 +103,9 @@ class Model_Base(nn.Module):
 
     def detach_hidden_state(self, dones: torch.Tensor | None = None) -> None:
         pass
+    
+    def as_jit(self):
+        pass
 
-   
+    def as_onnx(self, verbose: bool):
+        pass
