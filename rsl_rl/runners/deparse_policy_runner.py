@@ -15,7 +15,7 @@ from rsl_rl.env import VecEnv
 from rsl_rl.models import MLPModel
 from rsl_rl.utils import check_nan, resolve_callable
 from rsl_rl.utils.logger import Logger
-
+from tensordict import TensorDict
 
 class DeparseOnPolicyRunner:
     """On-policy runner for reinforcement learning algorithms."""
@@ -33,11 +33,13 @@ class DeparseOnPolicyRunner:
         self._configure_multi_gpu()
 
         # Query observations from the environment for algorithm construction
-        obs = self.env.get_observations()
+        _, obs_dict = self.env.get_observations() # tuple (obs_tensor, {'observations': {'policy': tensor; 'critics': tensor}})
 
         # Create the algorithm
         alg_class: type[DeparsePPO] = resolve_callable(self.cfg["algorithm"]["class_name"])  # type: ignore
-        self.alg = alg_class.construct_algorithm(obs, self.env, self.cfg, self.device)
+        # import ipdb; ipdb.set_trace()
+        self.alg = alg_class.construct_algorithm(obs_dict['observations'], self.env, self.cfg, self.device)
+        # import ipdb; ipdb.set_trace()
 
         # Create the logger
         self.logger = Logger(
@@ -62,7 +64,8 @@ class DeparseOnPolicyRunner:
             )
 
         # Start learning
-        obs = self.env.get_observations().to(self.device)
+        # obs = self.env.get_observations().to(self.device)
+        obs = self.env.get_observations()[1]["observations"]
         self.alg.train_mode()  # switch to train mode (for dropout for example)
 
         # Ensure all parameters are in-synced
@@ -82,9 +85,12 @@ class DeparseOnPolicyRunner:
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
                     # Sample actions
+                    obs = TensorDict(obs, batch_size=[self.env.num_envs])
                     actions = self.alg.act(obs)
                     # Step the environment
-                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    _, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    obs = extras["observations"]
+                    obs = TensorDict(obs, batch_size=[self.env.num_envs])
                     # Check for NaN values from the environment
                     if self.cfg.get("check_for_nan", True):
                         check_nan(obs, rewards, dones)

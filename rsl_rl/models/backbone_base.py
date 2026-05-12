@@ -32,6 +32,14 @@ class BaseModel(nn.Module):
         output_dim: int,
         **backbone_cfg  # 收集所有额外的关键字参数
     ) -> None:
+        """
+            obs:        {obs_name: tensor}
+            obs_groups: {obs_group_name: [obs_name_list]}
+            obs_set:    obs_group_name
+                -->
+            self.obs_groups: [obs_name_list]
+            self.obs_dim:    {obs_name: dim}
+        """
         super().__init__()
         # Resolve observation groups and dimensions
         self.obs_groups, self.obs_dim = self._get_obs_dim(obs, obs_groups, obs_set)
@@ -51,7 +59,11 @@ class BaseModel(nn.Module):
         hidden_state: HiddenState = None,
         train_mode: bool = False,
     ) -> dict[str, torch.Tensor]:
-        
+        """
+            obs: {obs_name: tensor}
+            self.obs_groups: {}
+        """
+        # import ipdb; ipdb.set_trace()
         obs = unpad_trajectories(obs, masks) if masks is not None else obs
         if self.obs_normalization:
             obs_normed = obs.clone()  # [FIX 2] 不改原始 TensorDict，避免 actor/critic 共享 obs 时互相污染

@@ -58,6 +58,7 @@ class StochasticWrapper(nn.Module):
             - ``"extra"``: any additional outputs the backbone returned beyond ``"actions"``
               (e.g. ``"sub_latent"`` from :class:`~rsl_rl.models.SubEncoderMLPModel`)
         """
+        # import ipdb; ipdb.set_trace()
         backbone_output = self.backbone(
             obs,
             masks=masks,
