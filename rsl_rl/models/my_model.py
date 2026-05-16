@@ -38,6 +38,7 @@ class MyModel(Model_Base):
         self.encoders = nn.ModuleDict()
         self.encoder_cfg = backbone_cfg.get("encoder", {})
         self.main_encoder_name = backbone_cfg.get("main_encoder", None)
+        self.encoder_names = list(self.encoder_cfg.keys())
 
         for k, v in self.encoder_cfg.items():
             encoder_groups = v.get("encoder_groups", [])
@@ -51,16 +52,7 @@ class MyModel(Model_Base):
             )
             self.encoders[k] = mlp
 
-        # each encoder owns an equal slice of latent_dim; mask shape: (n_encoders, latent_dim)
-        n_enc = len(self.encoder_cfg)
-        if n_enc > 1:
-            chunk = latent_dim // n_enc
-            masks = torch.zeros(n_enc, latent_dim)
-            for i in range(n_enc):
-                masks[i, i * chunk : (i + 1) * chunk] = 1.0
-            self.register_buffer("encoder_masks", masks)   # (n, D), reusable in losses
-        else:
-            self.encoder_masks = None
+        self.num_encoders = len(self.encoder_names)
 
         # decoder
         self.decoders = nn.ModuleDict()
@@ -86,6 +78,16 @@ class MyModel(Model_Base):
             )
             self.decoders[k] = mlp
 
+    def _build_encoder_masks(self, batch_size: int, device: torch.device) -> torch.Tensor | None:
+        if self.num_encoders <= 1:
+            return None
+
+        masks = torch.zeros(self.num_encoders, batch_size, 1, device=device)
+        batch_indices = torch.arange(batch_size, device=device)
+        encoder_indices = batch_indices * self.num_encoders // batch_size
+        masks[encoder_indices, batch_indices, 0] = 1.0
+        return masks
+
     def forward(
             self,
             obs: TensorDict,
@@ -101,13 +103,18 @@ class MyModel(Model_Base):
                 encoder_input = torch.cat([obs[g] for g in encoder_groups], dim=-1)
                 latents[k] = encoder(encoder_input)
 
-            if self.main_encoder_name is not None:
-                if self.encoder_masks is None:
+            if self.main_encoder_name is not None: # 选择主 encoder 输出作为 latent，或对多个 encoder 输出加权求和（权重由 self.encoder_masks 指定）
+                encoder_masks = self._build_encoder_masks(
+                    batch_size=next(iter(latents.values())).shape[0],
+                    device=next(iter(latents.values())).device,
+                )
+
+                if encoder_masks is None:
                     main_latent = latents[self.main_encoder_name]
                 else:
-                    # latent_stack: (n, B, D); masks: (n, 1, D) → sum over encoders → (B, D)
-                    latent_stack = torch.stack(list(latents.values()), dim=0)
-                    main_latent = (latent_stack * self.encoder_masks.unsqueeze(1)).sum(0)
+                    # latent_stack: (n, B, D); masks: (n, B, 1) → sum over encoders → (B, D)
+                    latent_stack = torch.stack([latents[name] for name in self.encoder_names], dim=0)
+                    main_latent = (latent_stack * encoder_masks).sum(0)
 
             # [FSQ] (batch, latent_dim) → (batch, max_num_tokens, num_fsq_levels) → 量化 → (batch, latent_dim)
             if self.fsq is not None:
@@ -142,7 +149,7 @@ class MyModel(Model_Base):
                         if self.loss_cfg.get("recon", 0.0) > 0.0:
                             losses[f"{k}_recon"] = F.mse_loss(recon["g1_kin_decoder"], target) * self.loss_cfg["recon"]
                         
-                        if self.loss_cfg.get("reencode", 0.0) > 0.0:
+                        if self.loss_cfg.get("re_encode", 0.0) > 0.0:
                             recon_kin_smpl = self.decoders["g1_kin_decoder"](latents["encoder_smpl"])
                             latents_matched = self.encoders["encoder_g1"](recon_kin_smpl)
                             losses[f"{k}_re_encode"] = F.mse_loss(

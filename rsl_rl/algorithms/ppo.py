@@ -32,7 +32,7 @@ class PPO:
 
     def __init__(
         self,
-        actor: MLPModel,
+        actor: ActorModel,
         critic: MLPModel,
         storage: RolloutStorage,
         num_learning_epochs: int = 5,
