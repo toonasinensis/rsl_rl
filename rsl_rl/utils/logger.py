@@ -36,6 +36,8 @@ class Logger:
         self.cfg = cfg
         self.env_cfg = env_cfg
         self.num_envs = num_envs
+        self.is_distributed = is_distributed
+        self.gpu_global_rank = gpu_global_rank
         self.gpu_world_size = gpu_world_size
         self.device = device
         self.git_status_repos = [rsl_rl.__file__]
@@ -103,32 +105,32 @@ class Logger:
         intrinsic_rewards: torch.Tensor | None = None,
     ) -> None:
         """Add metrics from the environment step to the buffers."""
-        if self.writer is not None:
-            if "episode" in extras:
-                self.ep_extras.append(extras["episode"])
-            elif "log" in extras:
-                self.ep_extras.append(extras["log"])
+        # Keep episode-level buffers on every rank so rank-0 can gather distributed means.
+        if "episode" in extras:
+            self.ep_extras.append(extras["episode"])
+        elif "log" in extras:
+            self.ep_extras.append(extras["log"])
 
-            # Update rewards and episode length
-            if intrinsic_rewards is not None:
-                self.cur_ereward_sum += rewards
-                self.cur_ireward_sum += intrinsic_rewards
-                self.cur_reward_sum += rewards + intrinsic_rewards
-            else:
-                self.cur_reward_sum += rewards
-            self.cur_episode_length += 1
+        # Update rewards and episode length
+        if intrinsic_rewards is not None:
+            self.cur_ereward_sum += rewards
+            self.cur_ireward_sum += intrinsic_rewards
+            self.cur_reward_sum += rewards + intrinsic_rewards
+        else:
+            self.cur_reward_sum += rewards
+        self.cur_episode_length += 1
 
-            # Clear data for completed episodes
-            new_ids = (dones > 0).nonzero(as_tuple=False)
-            self.rewbuffer.extend(self.cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-            self.lenbuffer.extend(self.cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-            self.cur_reward_sum[new_ids] = 0
-            self.cur_episode_length[new_ids] = 0
-            if intrinsic_rewards is not None:
-                self.erewbuffer.extend(self.cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                self.irewbuffer.extend(self.cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                self.cur_ereward_sum[new_ids] = 0
-                self.cur_ireward_sum[new_ids] = 0
+        # Clear data for completed episodes
+        new_ids = (dones > 0).nonzero(as_tuple=False)
+        self.rewbuffer.extend(self.cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
+        self.lenbuffer.extend(self.cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+        self.cur_reward_sum[new_ids] = 0
+        self.cur_episode_length[new_ids] = 0
+        if intrinsic_rewards is not None:
+            self.erewbuffer.extend(self.cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
+            self.irewbuffer.extend(self.cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
+            self.cur_ereward_sum[new_ids] = 0
+            self.cur_ireward_sum[new_ids] = 0
 
     def log(
         self,
@@ -149,6 +151,18 @@ class Logger:
 
         If videos are available, they are uploaded to the logging service (W&B) as well.
         """
+        # Gather per-rank mean episode length so rank 0 can log all GPUs to WandB.
+        gathered_mean_episode_length = None
+        if self.is_distributed and torch.distributed.is_available() and torch.distributed.is_initialized():
+            local_mean_episode_length = torch.tensor(
+                statistics.mean(self.lenbuffer) if len(self.lenbuffer) > 0 else 0.0,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            gathered_tensors = [torch.zeros_like(local_mean_episode_length) for _ in range(self.gpu_world_size)]
+            torch.distributed.all_gather(gathered_tensors, local_mean_episode_length)
+            gathered_mean_episode_length = [t.item() for t in gathered_tensors]
+
         if self.writer is not None:
             collection_size = self.cfg["num_steps_per_env"] * self.num_envs * self.gpu_world_size
             iteration_time = collect_time + learn_time
@@ -198,6 +212,13 @@ class Logger:
                
                 self.writer.add_scalar("Train/mean_reward", statistics.mean(self.rewbuffer), it)
                 self.writer.add_scalar("Train/mean_episode_length", statistics.mean(self.lenbuffer), it)
+                if gathered_mean_episode_length is not None:
+                    for gpu_idx, gpu_mean_episode_length in enumerate(gathered_mean_episode_length):
+                        self.writer.add_scalar(
+                            f"Train/mean_episode_length_gpu_{gpu_idx}",
+                            gpu_mean_episode_length,
+                            it,
+                        )
                 if self.logger_type != "wandb":
                     self.writer.add_scalar(
                         "Train/mean_reward/time", statistics.mean(self.rewbuffer), int(self.tot_time)

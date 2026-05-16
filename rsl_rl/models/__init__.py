@@ -7,6 +7,7 @@
 from .backbone_base import BaseModel
 from .backbone_fsq import BackboneFSQ
 from .backbone_mlp import BackboneMLP
+from .backbone_moe import BackboneMoE
 from .backbone_cnn import BackboneCNN
 from .backbone_rnn import BackboneRNN
 from .wrapper_stochastic import StochasticWrapper
@@ -16,6 +17,7 @@ CNNModel = BackboneCNN
 MLPModel = BackboneMLP
 RNNModel = BackboneRNN
 FSQModel = BackboneFSQ
+MoEModel = BackboneMoE
 class ActorModel(StochasticWrapper):
     """Backward-compatible name for the stochastic actor wrapper."""
 
@@ -25,12 +27,14 @@ __all__ = [
 
     "BackboneCNN",
     "BackboneMLP",
+    "BackboneMoE",
     "BackboneRNN",
     "BackboneFSQ",
     "CNNModel",
     "MLPModel",
     "RNNModel",
     "FSQModel",
+    "MoEModel",
 
     "StochasticWrapper",
     "ActorModel",

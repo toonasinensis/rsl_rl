@@ -249,3 +249,12 @@ class DeparseOnPolicyRunner:
         torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
         # Set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)
+
+    def eval_mode(self) -> None:
+        """Set evaluation mode for learnable models."""
+        self.alg.eval_mode()
+    
+    def train_mode(self) -> None:
+        """Set train mode for learnable models."""
+        self.alg.train_mode()
+    

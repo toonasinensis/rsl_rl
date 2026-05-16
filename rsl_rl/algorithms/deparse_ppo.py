@@ -85,11 +85,11 @@ class DeparsePPO:
 
         # Handles to the uncompiled modules for state_dict operations and export. If compilation is disabled, these
         # simply alias ``self.actor`` / ``self.critic``.
+        # NOTE the two are redundant codes
         self._raw_actor = self.actor
         self._raw_critic = self.critic
 
         # Create separate optimizers.
-        #
         # In this cluster PPO variant we keep the actor synchronized across ranks (by reducing its gradients),
         # while critics are updated independently per rank. Splitting optimizers lets us keep actor LR decisions
         # (e.g. adaptive KL schedule) consistent across ranks, while leaving critic LR fully local.
@@ -328,6 +328,7 @@ class DeparsePPO:
                 else:
                     symmetry_loss = symmetry_loss.detach()
 
+
             # Compute the gradients for PPO
             self.actor_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
@@ -359,6 +360,7 @@ class DeparsePPO:
                 loss_dict_value = aux_loss.detach()
                 aux_loss_value = loss_dict_value.item() if loss_dict_value.numel() == 1 else loss_dict_value.mean().item()
                 mean_aux_losses[loss_name] = mean_aux_losses.get(loss_name, 0.0) + aux_loss_value
+            
             # RND loss
             if mean_rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
@@ -371,6 +373,8 @@ class DeparsePPO:
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_entropy /= num_updates
+        # TODO move return metrics to logger
+        mean_returns = self.storage.returns.mean().detach().item()
         if mean_rnd_loss is not None:
             mean_rnd_loss /= num_updates
         if mean_symmetry_loss is not None:
@@ -378,17 +382,40 @@ class DeparsePPO:
         for name in mean_aux_losses:
             mean_aux_losses[name] /= num_updates
 
+        # Synchronize logging metrics across all GPUs for rank-0 logger (WandB/TB/Neptune).
+        if self.is_multi_gpu:
+            # Compute local metrics for this rank.
+            local_mean_value_loss = torch.tensor(mean_value_loss, device=self.device, dtype=torch.float32)
+            local_mean_rewards = self.storage.rewards.mean().detach().to(dtype=torch.float32)
+            local_mean_returns = self.storage.returns.mean().detach().to(dtype=torch.float32)
+            # Gather all rank metrics to rank 0 logger process.
+            local_metrics = torch.stack([local_mean_value_loss, local_mean_rewards, local_mean_returns])
+            gathered_metrics = [torch.zeros_like(local_metrics) for _ in range(self.gpu_world_size)]
+            torch.distributed.all_gather(gathered_metrics, local_metrics)
+            # NOTE compute global metrics by averaging
+            # NOTE move mean_rewards log to logger
+            # mean_value_loss = torch.stack([x[0] for x in gathered_metrics]).mean().item()
+            # mean_rewards = torch.stack([x[1] for x in gathered_metrics]).mean().item()
+            # mean_returns = torch.stack([x[2] for x in gathered_metrics]).mean().item()
+
         # Construct the loss dictionary
         loss_dict = {
             "value": mean_value_loss,
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
+            "returns": mean_returns,
         }
         if self.rnd:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
         loss_dict.update(mean_aux_losses)
+        # add metrics from other GPUs
+        if self.is_multi_gpu and self.gpu_global_rank == 0:
+            for gpu_idx, metrics in enumerate(gathered_metrics):
+                loss_dict[f"mean_value_loss_gpu_{gpu_idx}"] = metrics[0].item()
+                loss_dict[f"mean_rewards_gpu_{gpu_idx}"] = metrics[1].item()
+                loss_dict[f"mean_returns_gpu_{gpu_idx}"] = metrics[2].item()
 
         # Clear the storage
         self.storage.clear()
@@ -572,6 +599,11 @@ class DeparsePPO:
         if len(grads) == 0:
             return
         all_grads = torch.cat(grads)
+        
+        # TODO compute gradient from different GPUs through weighted sum ?
+        # the weight is computed according to the GPUs' value loss or returns ?
+        # or other indicators ?
+
         # Average the gradients across all GPUs
         torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
         all_grads /= self.gpu_world_size
