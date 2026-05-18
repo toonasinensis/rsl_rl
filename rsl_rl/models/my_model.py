@@ -7,7 +7,10 @@ from rsl_rl.modules import  HiddenState
 from rsl_rl.modules import MLP
 from rsl_rl.utils import resolve_callable
 import torch.nn.functional as F
-from vector_quantize_pytorch import FSQ
+try:
+    from vector_quantize_pytorch import FSQ
+except ImportError:
+    FSQ = None  # type: ignore[assignment,misc]
 
 
 class MyModel(Model_Base):

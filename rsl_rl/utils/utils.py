@@ -272,7 +272,6 @@ def construct_actor_with_shell(
     backbone_output_dim = actor_cfg.pop("backbone_output_dim", None)
     if backbone_output_dim is None:
         backbone_output_dim = resolve_actor_backbone_output_dim(num_actions, distribution_cfg)
-
     try:
         backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, distribution_cfg=None, **actor_cfg)
     except TypeError:

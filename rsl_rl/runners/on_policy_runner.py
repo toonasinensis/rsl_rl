@@ -83,6 +83,9 @@ class OnPolicyRunner:
                 for _ in range(self.cfg["num_steps_per_env"]):
                     # Sample actions
                     actions = self.alg.act(obs)
+                    # rollout hook: 让插件在 act 之后、env.step 之前保存跨步观测（如 AMP 的当前帧）
+                    for plugin in self.alg.plugins:
+                        plugin.on_after_act(self, obs)
                     # Step the environment
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     # Check for NaN values from the environment
@@ -90,7 +93,10 @@ class OnPolicyRunner:
                         check_nan(obs, rewards, dones)
                     # Move to device
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
-                    # Process the step
+                    # post-step hook: 插件可修改 rewards（如 AMP 判别器奖励替换任务奖励）
+                    for plugin in self.alg.plugins:
+                        rewards = plugin.on_after_step(self, obs, rewards, dones, extras)
+
                     self.alg.process_env_step(obs, rewards, dones, extras)
                     # Extract intrinsic rewards if RND is used (only for logging)
                     # Book keeping

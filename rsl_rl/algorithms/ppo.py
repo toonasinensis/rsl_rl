@@ -56,6 +56,8 @@ class PPO:
         symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
+        # Plugin list (instantiated by construct_algorithm, on_init called separately)
+        plugins: list | None = None,
     ) -> None:
         """Initialize the algorithm with models, storage, and optimization settings."""
         # Device-related parameters
@@ -102,6 +104,10 @@ class PPO:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
+        self.plugins: list = list(plugins) if plugins else []
+        # on_init is NOT called here — construct_algorithm calls it after env is available
+
+
     # region Rollout Environment Interaction and Return Computation 
 
     def act(self, obs: TensorDict) -> torch.Tensor:
@@ -142,6 +148,9 @@ class PPO:
         self.transition.clear()
         self.actor.reset(dones)
         self.critic.reset(dones)
+
+        # post-rollout hook (currently unused; reserved for plugins that need per-step processing)
+
 
     def compute_returns(self, obs: TensorDict) -> None:
         """Compute return and advantage targets from stored transitions."""
@@ -348,10 +357,12 @@ class PPO:
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
+        for plugin in self.plugins:
+            plugin.on_update_start(self)
+
         # Iterate over batches
         for batch in generator:
             original_batch_size = batch.observations.batch_size[0]
-
             # Check if we should normalize advantages per mini batch
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
@@ -363,6 +374,14 @@ class PPO:
                 "original_batch_size": original_batch_size,
             }
             loss_results = self._compute_loss(mb_forward_results, mb_rollout_data)
+
+            # 收集各插件的额外 loss，合并到总 loss 和日志中
+            for plugin in self.plugins:
+                extra = plugin.on_per_batch_extra_loss(self, batch)
+                if extra:
+                    loss_results["loss"] = loss_results["loss"] + sum(extra.values())
+                    loss_results.update(extra)
+
             loss = loss_results["loss"]
 
             # Compute the gradients for PPO
@@ -377,6 +396,11 @@ class PPO:
             nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
+
+
+            # 让插件在 backward 后裁剪自有参数（如判别器）的梯度
+            for plugin in self.plugins:
+                plugin.on_post_backward(self)
             # Store the losses.
             self._accumulate_loss_metrics(
                 metrics,
@@ -387,6 +411,10 @@ class PPO:
         num_updates = self.num_learning_epochs * self.num_mini_batches
         loss_dict = self._finalize_loss_metrics(metrics, num_updates)
 
+        # 插件可在此追加额外 metric（如 normalizer 统计量）
+        for plugin in self.plugins:
+            loss_dict.update(plugin.on_post_update(self))
+
         # Clear the storage
         self.storage.clear()
 
@@ -396,11 +424,15 @@ class PPO:
         """Set train mode for learnable models."""
         self.actor.train()
         self.critic.train()
-        
+        for plugin in self.plugins:
+            plugin.on_train_mode(self)
+
     def eval_mode(self) -> None:
         """Set evaluation mode for learnable models."""
         self.actor.eval()
         self.critic.eval()
+        for plugin in self.plugins:
+            plugin.on_eval_mode(self)
         
     def save(self) -> dict:
         """Return a dict of all models for saving."""
@@ -409,7 +441,8 @@ class PPO:
             "critic_state_dict": self.critic.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
-         
+        for plugin in self.plugins:
+            plugin.on_save(self, saved_dict)
         return saved_dict
 
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
@@ -430,7 +463,8 @@ class PPO:
             self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
         if load_cfg.get("optimizer"):
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
-         
+        for plugin in self.plugins:
+            plugin.on_load(self, loaded_dict)
         return load_cfg.get("iteration", False)
 
     def get_policy(self) -> MLPModel | ActorModel:
@@ -464,13 +498,25 @@ class PPO:
         # Initialize the storage
         storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
 
+        # 从 config 实例化插件（on_init 在此处调用，可访问 env）
+        plugins_cfgs: list[dict] = cfg["algorithm"].pop("plugins", [])
+        plugins: list = []
+        for pcfg in plugins_cfgs:
+            pcfg = dict(pcfg)
+            plugin_cls = resolve_callable(pcfg.pop("class_name"))
+            plugins.append(plugin_cls(**pcfg))
+
         # Initialize the algorithm
         alg: PPO = alg_class(
             actor, critic, storage,
             device=device,
+            plugins=plugins,
             **cfg["algorithm"],
             multi_gpu_cfg=cfg["multi_gpu"],
         )
+
+        for plugin in alg.plugins:
+            plugin.on_init(alg, env)
 
         return alg
 
