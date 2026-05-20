@@ -1,5 +1,6 @@
 # Code deprecated
 v_stack/*
+scripts/*
 
 # IDEs
 .idea
