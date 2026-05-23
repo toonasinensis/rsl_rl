@@ -195,7 +195,8 @@ class Logger:
 
             # Log losses
             for key, value in loss_dict.items():
-                self.writer.add_scalar(f"Loss/{key}", value, it)
+                scalar_path = key if self._is_named_metric(key) else f"Loss/{key}"
+                self.writer.add_scalar(scalar_path, value, it)
             self.writer.add_scalar("Loss/learning_rate", learning_rate, it)
 
             # Log std
@@ -245,7 +246,8 @@ class Logger:
 
             # Print losses
             for key, value in loss_dict.items():
-                log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
+                label = f"Mean {key}:" if self._is_named_metric(key) else f"Mean {key} loss:"
+                log_string += f"""{label:>{pad}} {value:.4f}\n"""
 
             # Print rewards and episode length
             if len(self.rewbuffer) > 0:
@@ -279,6 +281,11 @@ class Logger:
 
             # Clear extras buffer
             self.ep_extras.clear()
+
+    @staticmethod
+    def _is_named_metric(key: str) -> bool:
+        """Return whether a metric key already includes its logging namespace."""
+        return key.startswith(("MoE/", "Policy/", "Stats/"))
 
     def save_model(self, path: str, it: int) -> None:
         """Save the model to external logging services if specified."""

@@ -95,6 +95,10 @@ class BackboneMoE(BaseModel):
 
     def _compute_aux_losses(self, gates: torch.Tensor, router_logits: torch.Tensor) -> dict[str, torch.Tensor]:
         """ Compute auxiliary losses for MoE backbone. for encouraging exploration
+        {
+            "moe_load_balance":
+            "moe_router_z":
+        }
         """
         losses: dict[str, torch.Tensor] = {}
         if self.load_balance_loss_weight > 0.0:
@@ -119,6 +123,11 @@ class BackboneMoE(BaseModel):
         train_mode: bool = False,
     ):
         """ Router(x) * experts(x) -> actions
+        {
+            "aux_losses": dict_tensor {}
+            "moe_router_logits": tensor
+            "moe_gates": tensor
+        }
         """
         obs = super().forward(obs, masks, hidden_state, train_mode)
         x = torch.cat([obs[g] for g in self.obs_groups], dim=-1)

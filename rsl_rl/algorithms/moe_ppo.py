@@ -9,6 +9,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from itertools import chain
+from types import SimpleNamespace
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
@@ -72,6 +73,9 @@ class MoEPPO:
 
         # Keep signature backward-compatible, but symmetry is disabled in this PPO.
         _ = symmetry_cfg
+
+        # Keep a runner-compatible RND handle even though MoEPPO does not use intrinsic rewards.
+        self.rnd = SimpleNamespace(weight=float(rnd_cfg.get("weight", 0.0))) if rnd_cfg is not None else None
 
         # PPO components
         self.actor = actor.to(self.device)
@@ -231,6 +235,41 @@ class MoEPPO:
         if num_updates <= 0:
             raise ValueError(f"num_updates must be > 0, got {num_updates}")
         return {name: value / num_updates for name, value in metrics.items()}
+
+    @staticmethod
+    def _compute_moe_router_metrics(extra: dict) -> dict[str, torch.Tensor]:
+        """Compute logging metrics from MoE router outputs."""
+        with torch.no_grad():
+            gates = extra.get("moe_gates")
+            if not isinstance(gates, torch.Tensor):
+                return {}
+
+            # gates related
+            gates = gates.reshape(-1, gates.shape[-1])
+            eps = torch.finfo(gates.dtype).eps
+            gate_entropy = -(gates * (gates + eps).log()).sum(dim=-1).mean()
+            expert_importance = gates.mean(dim=0)
+            expert_utilization = (gates > 0).to(dtype=gates.dtype).mean(dim=0)
+            
+            metrics: dict[str, torch.Tensor] = {
+                "MoE/gate_entropy": gate_entropy,
+                "MoE/max_gate": gates.max(dim=-1).values.mean(),
+                "MoE/expert_importance_std": expert_importance.std(unbiased=False),
+                "MoE/expert_utilization_std": expert_utilization.std(unbiased=False),
+                "MoE/active_experts_per_sample": (gates > 0).to(dtype=gates.dtype).sum(dim=-1).mean(),
+            }
+
+            # router logits related
+            router_logits = extra.get("moe_router_logits")
+            if isinstance(router_logits, torch.Tensor):
+                router_logits = router_logits.reshape(-1, router_logits.shape[-1])
+                metrics["MoE/router_logit_abs_mean"] = router_logits.abs().mean()
+
+            for expert_idx in range(gates.shape[-1]):
+                metrics[f"MoE/expert_{expert_idx}_importance"] = expert_importance[expert_idx]
+                metrics[f"MoE/expert_{expert_idx}_utilization"] = expert_utilization[expert_idx]
+
+        return metrics
     # endregion
 
     # TODO remains to be checked
@@ -262,6 +301,7 @@ class MoEPPO:
             "distribution_params": distribution_params,
             "entropy": entropy,
             "aux_losses": aux_losses,
+            "moe_metrics": self._compute_moe_router_metrics(extra),
         }
 
     def _adjust_learning_rate_based_on_kl(self, batch: TensorDict, distribution_params: tuple[torch.Tensor, ...]) -> None:
@@ -336,11 +376,13 @@ class MoEPPO:
         if aux_loss_dict:
             loss = loss + sum(aux_loss_dict.values())  # type: ignore[arg-type]
 
-        return {
+        loss_results = {
             "loss": loss,
             "ppo_loss_dict": ppo_loss_dict,
             "aux_losses": aux_loss_dict,
         }
+        loss_results.update(mb_forward_results.get("moe_metrics", {}))
+        return loss_results
 
     def update(self) -> dict[str, float]:
         """Run optimization epochs over stored batches and return mean losses."""
@@ -447,7 +489,7 @@ class MoEPPO:
     def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> MoEPPO:
         """Construct the PPO algorithm."""
         # Resolve class callables
-        alg_class: type[PPO] = resolve_callable(cfg["algorithm"].pop("class_name"))  # type: ignore
+        alg_class: type[MoEPPO] = resolve_callable(cfg["algorithm"].pop("class_name"))  # type: ignore
         critic_class: type[BaseModel] = resolve_callable(cfg["critic"].pop("class_name"))  # type: ignore
 
         # Resolve observation groups
@@ -462,7 +504,10 @@ class MoEPPO:
         actor = construct_actor_with_shell(obs, cfg["obs_groups"], cfg["actor"], env.num_actions).to(device)
         print(f"Actor Model: {actor}")
         if cfg["algorithm"].pop("share_cnn_encoders", None):  # Share CNN encoders between actor and critic
-            cfg["critic"]["cnns"] = actor.backbone.cnns  # type: ignore
+            actor_backbone = actor.backbone if hasattr(actor, "backbone") else actor
+            if not hasattr(actor_backbone, "cnns"):
+                raise ValueError("share_cnn_encoders is not supported for MoEPPO unless the actor backbone exposes 'cnns'.")
+            cfg["critic"]["cnns"] = actor_backbone.cnns  # type: ignore
         critic: BaseModel = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
         print(f"Critic Model: {critic}")
 
@@ -496,10 +541,10 @@ class MoEPPO:
         This function is called after the backward pass to synchronize the gradients across all GPUs.
         """
         # Create a tensor to store the gradients
-        all_params = chain(self.actor.parameters(), self.critic.parameters())
-
-        all_params = list(all_params)
+        all_params = list(chain(self.actor.parameters(), self.critic.parameters()))
         grads = [param.grad.view(-1) for param in all_params if param.grad is not None]
+        if len(grads) == 0:
+            return
         all_grads = torch.cat(grads)
         # Average the gradients across all GPUs
         torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
