@@ -44,9 +44,13 @@ class Logger:
 
         # Create buffers
         self.ep_extras = []
-        self.rewbuffer = deque(maxlen=100)
         self.lenbuffer = deque(maxlen=100)
-        self.cur_reward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_buffers = {"reward": deque(maxlen=100)}
+        self.cur_metric_sums = {
+            "reward": torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        }
+        self.rewbuffer = self.metric_buffers["reward"]
+        self.cur_reward_sum = self.cur_metric_sums["reward"]
         self.cur_episode_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.rnd_enabled = bool(self.cfg.get("algorithm", {}).get("rnd_cfg"))
 
@@ -60,6 +64,26 @@ class Logger:
         # Decide whether to disable logging
         # Note: We only log from the process with rank 0 (main process)
         self.disable_logs = is_distributed and gpu_global_rank != 0
+
+    def _format_step_metric(self, value: torch.Tensor) -> torch.Tensor:
+        metric = value.detach().to(self.device)
+        if metric.ndim == 1:
+            metric = metric.unsqueeze(-1)
+        return metric.reshape(self.num_envs, -1).sum(dim=-1, keepdim=True)
+
+    def _get_metric_sum(self, name: str) -> torch.Tensor:
+        if name not in self.cur_metric_sums:
+            self.cur_metric_sums[name] = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+            self.metric_buffers[name] = deque(maxlen=100)
+        return self.cur_metric_sums[name]
+
+    @staticmethod
+    def _train_metric_tag(name: str) -> str:
+        return "Train/mean_reward" if name == "reward" else f"Train/mean_{name}"
+
+    @staticmethod
+    def _console_metric_label(name: str) -> str:
+        return "Mean reward:" if name == "reward" else f"Mean {name}:"
 
     def init_logging_writer(self) -> None:
         """Initialize the logging writer, which can be either Tensorboard, W&B or Neptune and save the code state.
@@ -109,24 +133,29 @@ class Logger:
             elif "log" in extras:
                 self.ep_extras.append(extras["log"])
 
+            # Update step metrics and episode length. Plugins may insert additional metrics into extras["step_metrics"].
+            step_metrics = dict(extras.get("step_metrics", {}))
+            step_metrics["reward"] = rewards
+            for name, value in step_metrics.items():
+                self._get_metric_sum(name).add_(self._format_step_metric(value))
+
             # Update rewards and episode length
             if intrinsic_rewards is not None:
                 self.cur_ereward_sum += rewards
                 self.cur_ireward_sum += intrinsic_rewards
-                self.cur_reward_sum += rewards + intrinsic_rewards
-            else:
-                self.cur_reward_sum += rewards
+                self._get_metric_sum("reward").add_(self._format_step_metric(intrinsic_rewards))
             self.cur_episode_length += 1
 
             # Clear data for completed episodes
-            new_ids = (dones > 0).nonzero(as_tuple=False)
-            self.rewbuffer.extend(self.cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-            self.lenbuffer.extend(self.cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-            self.cur_reward_sum[new_ids] = 0
+            new_ids = (dones.reshape(self.num_envs, -1).any(dim=-1)).nonzero(as_tuple=True)[0]
+            for name, metric_sum in self.cur_metric_sums.items():
+                self.metric_buffers[name].extend(metric_sum[new_ids][:, 0].cpu().numpy().tolist())
+                metric_sum[new_ids] = 0
+            self.lenbuffer.extend(self.cur_episode_length[new_ids].cpu().numpy().tolist())
             self.cur_episode_length[new_ids] = 0
             if intrinsic_rewards is not None:
-                self.erewbuffer.extend(self.cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                self.irewbuffer.extend(self.cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                self.erewbuffer.extend(self.cur_ereward_sum[new_ids].cpu().numpy().tolist())
+                self.irewbuffer.extend(self.cur_ireward_sum[new_ids].cpu().numpy().tolist())
                 self.cur_ereward_sum[new_ids] = 0
                 self.cur_ireward_sum[new_ids] = 0
 
@@ -195,13 +224,18 @@ class Logger:
 
             # Log rewards and episode length
             if len(self.rewbuffer) > 0:
-               
-                self.writer.add_scalar("Train/mean_reward", statistics.mean(self.rewbuffer), it)
+                for name, metric_buffer in self.metric_buffers.items():
+                    if len(metric_buffer) > 0:
+                        self.writer.add_scalar(self._train_metric_tag(name), statistics.mean(metric_buffer), it)
                 self.writer.add_scalar("Train/mean_episode_length", statistics.mean(self.lenbuffer), it)
                 if self.logger_type != "wandb":
-                    self.writer.add_scalar(
-                        "Train/mean_reward/time", statistics.mean(self.rewbuffer), int(self.tot_time)
-                    )
+                    for name, metric_buffer in self.metric_buffers.items():
+                        if len(metric_buffer) > 0:
+                            self.writer.add_scalar(
+                                f"{self._train_metric_tag(name)}/time",
+                                statistics.mean(metric_buffer),
+                                int(self.tot_time),
+                            )
                     self.writer.add_scalar(
                         "Train/mean_episode_length/time", statistics.mean(self.lenbuffer), int(self.tot_time)
                     )
@@ -228,8 +262,9 @@ class Logger:
 
             # Print rewards and episode length
             if len(self.rewbuffer) > 0:
-                
-                log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
+                for name, metric_buffer in self.metric_buffers.items():
+                    if len(metric_buffer) > 0:
+                        log_string += f"""{self._console_metric_label(name):>{pad}} {statistics.mean(metric_buffer):.2f}\n"""
                 log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
 
             # Print std

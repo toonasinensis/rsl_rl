@@ -98,5 +98,7 @@ class NeptuneSummaryWriter(SummaryWriter):
         """Map metric names to Neptune-compatible keys."""
         if path in self.name_map:
             return self.name_map[path]
+        if path.endswith("/time"):
+            return path.removesuffix("/time") + "_time"
         else:
             return path
