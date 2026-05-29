@@ -119,7 +119,7 @@ class MoEPPO:
         # Record the hidden states for recurrent policies
         self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
         # Compute the actions and values
-        self.transition.actions = self.actor(obs, stochastic_output=True)["actions"].detach()
+        self.transition.actions = self._extract_actions(self.actor(obs, stochastic_output=True)).detach()
         self.transition.values = self._critic_value(obs).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
@@ -340,7 +340,6 @@ class MoEPPO:
     def _compute_ppo_loss(self, forward_results: dict, mb_rollout_data: dict) -> dict[str, torch.Tensor]:
         """Compute PPO objective for one mini-batch."""
         batch: TensorDict = mb_rollout_data["batch"]
-        original_batch_size: int = mb_rollout_data["original_batch_size"]
 
         actions_log_prob = forward_results["actions_log_prob"]
         values = forward_results["values"]

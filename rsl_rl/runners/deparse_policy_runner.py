@@ -15,7 +15,6 @@ from rsl_rl.env import VecEnv
 from rsl_rl.models import MLPModel
 from rsl_rl.utils import check_nan, resolve_callable
 from rsl_rl.utils.logger import Logger
-from tensordict import TensorDict
 
 class DeparseOnPolicyRunner:
     """On-policy runner for reinforcement learning algorithms."""
@@ -257,4 +256,7 @@ class DeparseOnPolicyRunner:
     def train_mode(self) -> None:
         """Set train mode for learnable models."""
         self.alg.train_mode()
+
+
+OnPolicyRunner = DeparseOnPolicyRunner
     

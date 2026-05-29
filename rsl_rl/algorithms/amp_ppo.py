@@ -163,7 +163,7 @@ class AMPPPO(PPO):
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Sample actions and store transition data."""
         self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
-        self.transition.actions = self.actor(obs, stochastic_output=True)["actions"].detach()
+        self.transition.actions = self._extract_actions(self.actor(obs, stochastic_output=True)).detach()
         self.transition.values = self._critic_value(obs).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(  # type: ignore
             self.transition.actions

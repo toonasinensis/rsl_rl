@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import tempfile
 import torch
 from tensordict import TensorDict
@@ -179,9 +180,10 @@ class TestSaveLoad:
         """save() should create a checkpoint file at the given path."""
         runner = _build_runner()
         runner.learn(num_learning_iterations=1)
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
-            data = torch.load(f.name, weights_only=False, map_location="cpu")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
+            data = torch.load(path, weights_only=False, map_location="cpu")
             assert "iter" in data
 
     def test_load_restores_parameters(self) -> None:
@@ -189,8 +191,9 @@ class TestSaveLoad:
         runner = _build_runner()
         runner.learn(num_learning_iterations=2)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
             saved_actor = copy.deepcopy(runner.alg.actor.state_dict())
 
             runner.learn(num_learning_iterations=2)
@@ -198,7 +201,7 @@ class TestSaveLoad:
                 "Parameters should have changed after additional training"
             )
 
-            runner.load(f.name)
+            runner.load(path)
             for key, param in runner.alg.actor.state_dict().items():
                 assert torch.equal(saved_actor[key], param), f"Parameter '{key}' not restored after load"
 
@@ -207,14 +210,15 @@ class TestSaveLoad:
         runner = _build_runner()
         runner.learn(num_learning_iterations=3)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
             saved_iter = runner.current_learning_iteration
 
             runner.learn(num_learning_iterations=2)
             assert runner.current_learning_iteration != saved_iter
 
-            runner.load(f.name)
+            runner.load(path)
             assert runner.current_learning_iteration == saved_iter
 
     def test_load_restores_normalization_stats(self) -> None:
@@ -226,15 +230,16 @@ class TestSaveLoad:
         runner = OnPolicyRunner(DummyEnv(), cfg, log_dir=None, device="cpu")
         runner.learn(num_learning_iterations=2)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
             saved_state = copy.deepcopy(runner.alg.actor.state_dict())
 
             cfg2 = _make_train_cfg("mlp")
             cfg2["actor"]["obs_normalization"] = True
             cfg2["critic"]["obs_normalization"] = True
             runner2 = OnPolicyRunner(DummyEnv(), cfg2, log_dir=None, device="cpu")
-            runner2.load(f.name)
+            runner2.load(path)
 
             for key, param in runner2.alg.actor.state_dict().items():
                 assert torch.equal(saved_state[key], param), f"Normalization stat '{key}' not restored after load"
@@ -327,17 +332,30 @@ class TestRNNRunner:
         actions = policy(obs)
         assert actions.shape == (NUM_ENVS, NUM_ACTIONS)
 
+    def test_rnn_inference_policy_resets_hidden_state(self) -> None:
+        """The inference wrapper should preserve recurrent policy state controls."""
+        runner = _build_runner(model_type="rnn")
+        policy = runner.get_inference_policy()
+        obs = runner.env.get_observations()
+
+        policy(obs)
+        assert policy.get_hidden_state() is not None
+
+        policy.reset()
+        assert policy.get_hidden_state() is None
+
     def test_rnn_save_load_restores_parameters(self) -> None:
         """Save/load should preserve RNN model parameters (including hidden state shapes)."""
         runner = _build_runner(model_type="rnn")
         runner.learn(num_learning_iterations=2)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
             saved_actor = copy.deepcopy(runner.alg.actor.state_dict())
 
             runner.learn(num_learning_iterations=2)
-            runner.load(f.name)
+            runner.load(path)
 
             for key, param in runner.alg.actor.state_dict().items():
                 assert torch.equal(saved_actor[key], param), f"RNN parameter '{key}' not restored after load"
@@ -372,12 +390,13 @@ class TestCNNRunner:
         runner = _build_runner(model_type="cnn")
         runner.learn(num_learning_iterations=2)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
             saved_actor = copy.deepcopy(runner.alg.actor.state_dict())
 
             runner.learn(num_learning_iterations=2)
-            runner.load(f.name)
+            runner.load(path)
 
             for key, param in runner.alg.actor.state_dict().items():
                 assert torch.equal(saved_actor[key], param), f"CNN parameter '{key}' not restored after load"

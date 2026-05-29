@@ -56,6 +56,13 @@ class BackboneCNN(BaseModel):
         cnns = cnns if cnns is not None else backbone_cfg.get("cnns")
 
         super().__init__(obs, obs_groups, obs_set, output_dim, **backbone_cfg)
+        self.obs_dim_by_group = self.obs_dim
+        self.obs_dim = sum(self.obs_dim_by_group.values())
+        self.obs_normalizer = (
+            self.obs_normalizers[self.obs_groups[0]]
+            if self.obs_normalizers is not None and len(self.obs_groups) == 1
+            else nn.Identity()
+        )
 
         # Create or validate CNN encoders
         if cnns is not None:
@@ -88,7 +95,7 @@ class BackboneCNN(BaseModel):
                 raise ValueError("The output of the CNN must be flattened before passing it to the MLP.")
             self.cnn_latent_dim += int(cnn.output_dim)  # type: ignore
 
-        input_dim = sum(self.obs_dim.values()) + self.cnn_latent_dim
+        input_dim = self.obs_dim + self.cnn_latent_dim
         self.mlp = MLP(input_dim, output_dim, hidden_dims, activation)
 
         # Register CNN encoders
@@ -102,9 +109,21 @@ class BackboneCNN(BaseModel):
         obs: TensorDict | dict[str, torch.Tensor],
         masks: torch.Tensor | None = None,
         hidden_state: HiddenState = None,
+        stochastic_output: bool = False,
         train_mode: bool = False,
-    ) -> dict[str, torch.Tensor]:
-        """Return CNN/MLP backbone outputs in the BaseModel dict format."""
+    ) -> torch.Tensor:
+        """Return deterministic or sampled CNN/MLP output."""
+        latent = self.get_latent(obs, masks=masks, hidden_state=hidden_state, train_mode=train_mode)
+        return self._resolve_output(self.mlp(latent), stochastic_output=stochastic_output)
+
+    def get_latent(
+        self,
+        obs: TensorDict | dict[str, torch.Tensor],
+        masks: torch.Tensor | None = None,
+        hidden_state: HiddenState = None,
+        train_mode: bool = False,
+    ) -> torch.Tensor:
+        """Return concatenated normalized 1D observations and CNN features."""
         obs = super().forward(obs, masks, hidden_state, train_mode)
 
         latent_list = []
@@ -113,16 +132,15 @@ class BackboneCNN(BaseModel):
         # Process 2D observation groups with CNNs
         latent_cnn_list = [self.cnns[obs_group](obs[obs_group]) for obs_group in self.obs_groups_2d]
         latent_list.append(torch.cat(latent_cnn_list, dim=-1))
-        latent = torch.cat(latent_list, dim=-1)
-        return {"actions": self.mlp(latent)}
+        return torch.cat(latent_list, dim=-1)
 
-    def as_jit(self) -> nn.Module:
+    def as_jit(self, output_module: nn.Module | None = None) -> nn.Module:
         """Return a version of the model compatible with Torch JIT export."""
-        return _TorchCNNModel(self)
+        return _TorchCNNModel(self, output_module)
 
-    def as_onnx(self, verbose: bool = False) -> nn.Module:
+    def as_onnx(self, verbose: bool = False, output_module: nn.Module | None = None) -> nn.Module:
         """Return a version of the model compatible with ONNX export."""
-        return _OnnxCNNModel(self, verbose)
+        return _OnnxCNNModel(self, verbose, output_module)
 
     def _get_obs_dim(self, obs: TensorDict, obs_groups: dict[str, list[str]], obs_set: str) -> tuple[list[str], dict]:
         """Select active observation groups and compute observation dimension."""
@@ -159,25 +177,32 @@ class BackboneCNN(BaseModel):
 class _TorchCNNModel(nn.Module):
     """Exportable CNN model for JIT."""
 
-    def __init__(self, model: BackboneCNN) -> None:
+    def __init__(self, model: BackboneCNN, output_module: nn.Module | None = None) -> None:
         """Create a TorchScript-friendly copy of a CNNModel."""
         super().__init__()
-        self.obs_dims_1d = [model.obs_dim[g] for g in model.obs_groups]
-        self.obs_normalizers = (
-            nn.ModuleList([copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups])
-            if model.obs_normalizers is not None
-            else None
+        self.obs_dims_1d = [model.obs_dim_by_group[g] for g in model.obs_groups]
+        self.has_normalizers = model.obs_normalizers is not None
+        self.obs_normalizers = nn.ModuleList(
+            [copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups] if self.has_normalizers else []
         )
         # Convert ModuleDict to ModuleList for ordered iteration
         self.cnns = nn.ModuleList([copy.deepcopy(model.cnns[g]) for g in model.obs_groups_2d])
         self.mlp = copy.deepcopy(model.mlp)
+        if output_module is None and model.distribution is not None:
+            output_module = model.distribution.as_deterministic_output_module()
+        self.output_module = copy.deepcopy(output_module) if output_module is not None else nn.Identity()
 
     def _normalize_1d(self, obs_1d: torch.Tensor) -> torch.Tensor:
         """Normalize concatenated 1D observations using the backbone's per-group normalizers."""
-        if self.obs_normalizers is None or len(self.obs_dims_1d) == 0:
+        if not self.has_normalizers or len(self.obs_dims_1d) == 0:
             return obs_1d
-        chunks = torch.split(obs_1d, self.obs_dims_1d, dim=-1)
-        return torch.cat([normalizer(chunk) for normalizer, chunk in zip(self.obs_normalizers, chunks)], dim=-1)
+        normalized_obs = []
+        start = 0
+        for i, normalizer in enumerate(self.obs_normalizers):
+            end = start + self.obs_dims_1d[i]
+            normalized_obs.append(normalizer(obs_1d[..., start:end]))
+            start = end
+        return torch.cat(normalized_obs, dim=-1)
 
     def forward(self, obs_1d: torch.Tensor, obs_2d: list[torch.Tensor]) -> torch.Tensor:
         """Run deterministic inference from separated 1D and 2D inputs."""
@@ -191,7 +216,7 @@ class _TorchCNNModel(nn.Module):
         latent = torch.cat([latent_1d, latent_cnn], dim=-1)
 
         out = self.mlp(latent)
-        return out
+        return self.output_module(out)
 
     @torch.jit.export
     def reset(self) -> None:
@@ -202,31 +227,38 @@ class _TorchCNNModel(nn.Module):
 class _OnnxCNNModel(nn.Module):
     """Exportable CNN model for ONNX."""
 
-    def __init__(self, model: BackboneCNN, verbose: bool) -> None:
+    def __init__(self, model: BackboneCNN, verbose: bool, output_module: nn.Module | None = None) -> None:
         """Create an ONNX-export wrapper around a CNNModel."""
         super().__init__()
         self.verbose = verbose
-        self.obs_dims_1d = [model.obs_dim[g] for g in model.obs_groups]
-        self.obs_normalizers = (
-            nn.ModuleList([copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups])
-            if model.obs_normalizers is not None
-            else None
+        self.obs_dims_1d = [model.obs_dim_by_group[g] for g in model.obs_groups]
+        self.has_normalizers = model.obs_normalizers is not None
+        self.obs_normalizers = nn.ModuleList(
+            [copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups] if self.has_normalizers else []
         )
         # Convert ModuleDict to ModuleList for ordered iteration
         self.cnns = nn.ModuleList([copy.deepcopy(model.cnns[g]) for g in model.obs_groups_2d])
         self.mlp = copy.deepcopy(model.mlp)
+        if output_module is None and model.distribution is not None:
+            output_module = model.distribution.as_deterministic_output_module()
+        self.output_module = copy.deepcopy(output_module) if output_module is not None else nn.Identity()
 
         self.obs_groups_2d = model.obs_groups_2d
         self.obs_dims_2d = model.obs_dims_2d
         self.obs_channels_2d = model.obs_channels_2d
-        self.obs_dim_1d = sum(model.obs_dim.values())
+        self.obs_dim_1d = model.obs_dim
 
     def _normalize_1d(self, obs_1d: torch.Tensor) -> torch.Tensor:
         """Normalize concatenated 1D observations using the backbone's per-group normalizers."""
-        if self.obs_normalizers is None or len(self.obs_dims_1d) == 0:
+        if not self.has_normalizers or len(self.obs_dims_1d) == 0:
             return obs_1d
-        chunks = torch.split(obs_1d, self.obs_dims_1d, dim=-1)
-        return torch.cat([normalizer(chunk) for normalizer, chunk in zip(self.obs_normalizers, chunks)], dim=-1)
+        normalized_obs = []
+        start = 0
+        for i, normalizer in enumerate(self.obs_normalizers):
+            end = start + self.obs_dims_1d[i]
+            normalized_obs.append(normalizer(obs_1d[..., start:end]))
+            start = end
+        return torch.cat(normalized_obs, dim=-1)
 
     def forward(self, obs_1d: torch.Tensor, *obs_2d: torch.Tensor) -> torch.Tensor:
         """Run deterministic inference for ONNX export."""
@@ -240,7 +272,7 @@ class _OnnxCNNModel(nn.Module):
         latent = torch.cat([latent_1d, latent_cnn], dim=-1)
 
         out = self.mlp(latent)
-        return out
+        return self.output_module(out)
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:
         """Return representative dummy inputs for ONNX tracing."""

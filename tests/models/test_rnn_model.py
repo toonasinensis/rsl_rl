@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import torch
 from tensordict import TensorDict
@@ -200,6 +201,34 @@ class TestRNNModelJITExport:
         assert torch.allclose(original_output, jit_output, atol=1e-5), f"JIT stochastic export mismatch for {rnn_type}"
 
     @pytest.mark.parametrize("rnn_type", ["gru", "lstm"])
+    def test_jit_export_with_normalization(self, rnn_type: str) -> None:
+        """JIT export should work when RNN models include observation normalization."""
+        obs = make_obs(1, OBS_DIM)
+        model = RNNModel(
+            obs,
+            {"actor": ["policy"]},
+            "actor",
+            NUM_ACTIONS,
+            hidden_dims=[32, 32],
+            activation="elu",
+            rnn_type=rnn_type,
+            rnn_hidden_dim=16,
+            rnn_num_layers=1,
+            obs_normalization=True,
+            distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+        )
+        model.eval()
+
+        original_output = model(obs, stochastic_output=False).detach()
+
+        jit_model = torch.jit.script(model.as_jit())
+        jit_model.reset()
+        obs_concat = torch.cat([obs[g] for g in model.obs_groups], dim=-1)
+        jit_output = jit_model(obs_concat)
+
+        assert torch.allclose(original_output, jit_output, atol=1e-5), f"JIT normalized export mismatch for {rnn_type}"
+
+    @pytest.mark.parametrize("rnn_type", ["gru", "lstm"])
     def test_jit_export_sequential_consistency(self, rnn_type: str) -> None:
         """JIT model should accumulate hidden state across steps, matching original multi-step behavior."""
         obs = make_obs(1, OBS_DIM)
@@ -256,17 +285,18 @@ class TestRNNModelONNXExport:
         onnx_model = model.as_onnx(verbose=False)
         onnx_model.eval()
 
-        with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "model.onnx")
             torch.onnx.export(
                 onnx_model,
                 onnx_model.get_dummy_inputs(),
-                f.name,
+                path,
                 export_params=True,
                 opset_version=18,
                 input_names=onnx_model.input_names,
                 output_names=onnx_model.output_names,
             )
-            loaded = onnx.load(f.name)
+            loaded = onnx.load(path)
             onnx.checker.check_model(loaded)
 
             assert [i.name for i in loaded.graph.input] == onnx_model.input_names

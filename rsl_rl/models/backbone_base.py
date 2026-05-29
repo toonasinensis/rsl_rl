@@ -5,14 +5,15 @@
 
 
 from __future__ import annotations
-from dataclasses import MISSING
 
+import copy
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
 from rsl_rl.modules import EmpiricalNormalization, HiddenState
-from rsl_rl.utils import unpad_trajectories
+from rsl_rl.modules.distribution import Distribution
+from rsl_rl.utils import resolve_callable, unpad_trajectories
 
 
 class BaseModel(nn.Module):
@@ -44,6 +45,12 @@ class BaseModel(nn.Module):
         # Resolve observation groups and dimensions
         self.obs_groups, self.obs_dim = self._get_obs_dim(obs, obs_groups, obs_set)
         self.output_dim = output_dim
+        self.distribution: Distribution | None = None
+        distribution_cfg = backbone_cfg.get("distribution_cfg")
+        if distribution_cfg is not None:
+            dist_cfg = copy.deepcopy(distribution_cfg)
+            dist_class: type[Distribution] = resolve_callable(dist_cfg.pop("class_name"))  # type: ignore
+            self.distribution = dist_class(output_dim, **dist_cfg)
         # Observation normalization
         self.obs_normalization = backbone_cfg.get("obs_normalization", False)
         if self.obs_normalization:
@@ -72,6 +79,46 @@ class BaseModel(nn.Module):
         else:
             obs_normed = obs
         return obs_normed
+
+    def _resolve_output(self, output: torch.Tensor, stochastic_output: bool = False) -> torch.Tensor:
+        """Apply the optional legacy distribution head to a raw model output."""
+        if self.distribution is None:
+            return output
+
+        self.distribution.update(output)
+        if stochastic_output:
+            return self.distribution.sample()
+        return self.distribution.deterministic_output(output)
+
+    @property
+    def output_mean(self) -> torch.Tensor:
+        """Return the mean of the current output distribution."""
+        return self.distribution.mean  # type: ignore[union-attr]
+
+    @property
+    def output_std(self) -> torch.Tensor:
+        """Return the standard deviation of the current output distribution."""
+        return self.distribution.std  # type: ignore[union-attr]
+
+    @property
+    def output_entropy(self) -> torch.Tensor:
+        """Return entropy of the current output distribution."""
+        return self.distribution.entropy  # type: ignore[union-attr]
+
+    @property
+    def output_distribution_params(self) -> tuple[torch.Tensor, ...]:
+        """Return current distribution parameters."""
+        return self.distribution.params  # type: ignore[union-attr]
+
+    def get_output_log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
+        """Compute output log-probability from the current distribution."""
+        return self.distribution.log_prob(outputs)  # type: ignore[union-attr]
+
+    def get_kl_divergence(
+        self, old_params: tuple[torch.Tensor, ...], new_params: tuple[torch.Tensor, ...]
+    ) -> torch.Tensor:
+        """Compute KL divergence between two distribution parameterizations."""
+        return self.distribution.kl_divergence(old_params, new_params)  # type: ignore[union-attr]
 
     def _compute_aux_losses(
             self,

@@ -72,15 +72,16 @@ class BackboneRNN(BaseModel):
         obs: TensorDict | dict[str, torch.Tensor],
         masks: torch.Tensor | None = None,
         hidden_state: HiddenState = None,
+        stochastic_output: bool = False,
         train_mode: bool = False,
-    ) -> dict[str, torch.Tensor]:
-        """Return recurrent backbone outputs in the BaseModel dict format."""
+    ) -> torch.Tensor:
+        """Return deterministic or sampled recurrent output."""
         # Keep padded recurrent batches intact; RNN consumes masks and unpads its output.
         obs = super().forward(obs, None, hidden_state, train_mode)
         latent = torch.cat([obs[g] for g in self.obs_groups], dim=-1)
         # Pass through the RNN
         latent = self.rnn(latent, masks, hidden_state).squeeze(0)
-        return {"actions": self.mlp(latent)}
+        return self._resolve_output(self.mlp(latent), stochastic_output=stochastic_output)
 
     def reset(self, dones: torch.Tensor | None = None, hidden_state: HiddenState = None) -> None:
         """Reset the recurrent hidden state of the RNN."""
@@ -94,42 +95,49 @@ class BackboneRNN(BaseModel):
         """Detach the recurrent hidden state for truncated backpropagation."""
         self.rnn.detach_hidden_state(dones)
 
-    def as_jit(self) -> nn.Module:
+    def as_jit(self, output_module: nn.Module | None = None) -> nn.Module:
         """Return a version of the model compatible with Torch JIT export."""
         if isinstance(self.rnn.rnn, nn.LSTM):
-            return _TorchLSTMModel(self)
+            return _TorchLSTMModel(self, output_module)
         elif isinstance(self.rnn.rnn, nn.GRU):
-            return _TorchGRUModel(self)
+            return _TorchGRUModel(self, output_module)
         else:
             raise NotImplementedError(f"Unsupported RNN type: {type(self.rnn.rnn)}")
 
-    def as_onnx(self, verbose: bool = False) -> nn.Module:
+    def as_onnx(self, verbose: bool = False, output_module: nn.Module | None = None) -> nn.Module:
         """Return a version of the model compatible with ONNX export."""
-        return _OnnxRNNModel(self, verbose)
+        return _OnnxRNNModel(self, verbose, output_module)
 
 class _TorchGRUModel(nn.Module):
     """Exportable GRU model for JIT."""
 
-    def __init__(self, model: BackboneRNN) -> None:
+    def __init__(self, model: BackboneRNN, output_module: nn.Module | None = None) -> None:
         """Create a TorchScript-friendly copy of a GRU-based RNNModel."""
         super().__init__()
         self.obs_dims = [model.obs_dim[g] for g in model.obs_groups]
-        self.obs_normalizers = (
-            nn.ModuleList([copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups])
-            if model.obs_normalizers is not None
-            else None
+        self.has_normalizers = model.obs_normalizers is not None
+        self.obs_normalizers = nn.ModuleList(
+            [copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups] if self.has_normalizers else []
         )
         self.rnn = copy.deepcopy(model.rnn.rnn)  # Access underlying torch module to avoid wrapper logic during export
         self.mlp = copy.deepcopy(model.mlp)
         self.rnn.cpu()
+        if output_module is None and model.distribution is not None:
+            output_module = model.distribution.as_deterministic_output_module()
+        self.output_module = copy.deepcopy(output_module) if output_module is not None else nn.Identity()
         self.register_buffer("hidden_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size))
 
     def _normalize(self, obs: torch.Tensor) -> torch.Tensor:
         """Normalize concatenated observations using per-group normalizers."""
-        if self.obs_normalizers is None:
+        if not self.has_normalizers:
             return obs
-        chunks = torch.split(obs, self.obs_dims, dim=-1)
-        return torch.cat([normalizer(chunk) for normalizer, chunk in zip(self.obs_normalizers, chunks)], dim=-1)
+        normalized_obs = []
+        start = 0
+        for i, normalizer in enumerate(self.obs_normalizers):
+            end = start + self.obs_dims[i]
+            normalized_obs.append(normalizer(obs[..., start:end]))
+            start = end
+        return torch.cat(normalized_obs, dim=-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run one GRU inference step and update hidden states."""
@@ -138,7 +146,7 @@ class _TorchGRUModel(nn.Module):
         self.hidden_state[:] = h  # type: ignore
         x = x.squeeze(0)
         out = self.mlp(x)
-        return out
+        return self.output_module(out)
 
     @torch.jit.export
     def reset(self) -> None:
@@ -149,26 +157,33 @@ class _TorchGRUModel(nn.Module):
 class _TorchLSTMModel(nn.Module):
     """Exportable LSTM model for JIT."""
 
-    def __init__(self, model: BackboneRNN) -> None:
+    def __init__(self, model: BackboneRNN, output_module: nn.Module | None = None) -> None:
         """Create a TorchScript-friendly copy of an LSTM-based RNNModel."""
         super().__init__()
         self.obs_dims = [model.obs_dim[g] for g in model.obs_groups]
-        self.obs_normalizers = (
-            nn.ModuleList([copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups])
-            if model.obs_normalizers is not None
-            else None
+        self.has_normalizers = model.obs_normalizers is not None
+        self.obs_normalizers = nn.ModuleList(
+            [copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups] if self.has_normalizers else []
         )
         self.rnn = copy.deepcopy(model.rnn.rnn)  # Access underlying torch module to avoid wrapper logic during export
         self.mlp = copy.deepcopy(model.mlp)
+        if output_module is None and model.distribution is not None:
+            output_module = model.distribution.as_deterministic_output_module()
+        self.output_module = copy.deepcopy(output_module) if output_module is not None else nn.Identity()
         self.register_buffer("hidden_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size))
         self.register_buffer("cell_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size))
 
     def _normalize(self, obs: torch.Tensor) -> torch.Tensor:
         """Normalize concatenated observations using per-group normalizers."""
-        if self.obs_normalizers is None:
+        if not self.has_normalizers:
             return obs
-        chunks = torch.split(obs, self.obs_dims, dim=-1)
-        return torch.cat([normalizer(chunk) for normalizer, chunk in zip(self.obs_normalizers, chunks)], dim=-1)
+        normalized_obs = []
+        start = 0
+        for i, normalizer in enumerate(self.obs_normalizers):
+            end = start + self.obs_dims[i]
+            normalized_obs.append(normalizer(obs[..., start:end]))
+            start = end
+        return torch.cat(normalized_obs, dim=-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run one LSTM inference step and update hidden and cell states."""
@@ -178,7 +193,7 @@ class _TorchLSTMModel(nn.Module):
         self.cell_state[:] = c  # type: ignore
         x = x.squeeze(0)
         out = self.mlp(x)
-        return out
+        return self.output_module(out)
 
     @torch.jit.export
     def reset(self) -> None:
@@ -192,18 +207,20 @@ class _OnnxRNNModel(nn.Module):
 
     is_recurrent: bool = True
 
-    def __init__(self, model: BackboneRNN, verbose: bool) -> None:
+    def __init__(self, model: BackboneRNN, verbose: bool, output_module: nn.Module | None = None) -> None:
         """Create an ONNX-export wrapper around an RNNModel."""
         super().__init__()
         self.verbose = verbose
         self.obs_dims = [model.obs_dim[g] for g in model.obs_groups]
-        self.obs_normalizers = (
-            nn.ModuleList([copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups])
-            if model.obs_normalizers is not None
-            else None
+        self.has_normalizers = model.obs_normalizers is not None
+        self.obs_normalizers = nn.ModuleList(
+            [copy.deepcopy(model.obs_normalizers[g]) for g in model.obs_groups] if self.has_normalizers else []
         )
         self.rnn = copy.deepcopy(model.rnn.rnn)  # Access underlying torch module to avoid wrapper logic during export
         self.mlp = copy.deepcopy(model.mlp)
+        if output_module is None and model.distribution is not None:
+            output_module = model.distribution.as_deterministic_output_module()
+        self.output_module = copy.deepcopy(output_module) if output_module is not None else nn.Identity()
 
         # Detect RNN type
         if isinstance(self.rnn, nn.LSTM):
@@ -219,10 +236,15 @@ class _OnnxRNNModel(nn.Module):
 
     def _normalize(self, obs: torch.Tensor) -> torch.Tensor:
         """Normalize concatenated observations using per-group normalizers."""
-        if self.obs_normalizers is None:
+        if not self.has_normalizers:
             return obs
-        chunks = torch.split(obs, self.obs_dims, dim=-1)
-        return torch.cat([normalizer(chunk) for normalizer, chunk in zip(self.obs_normalizers, chunks)], dim=-1)
+        normalized_obs = []
+        start = 0
+        for i, normalizer in enumerate(self.obs_normalizers):
+            end = start + self.obs_dims[i]
+            normalized_obs.append(normalizer(obs[..., start:end]))
+            start = end
+        return torch.cat(normalized_obs, dim=-1)
 
     def forward(
         self, obs: torch.Tensor, h_in: torch.Tensor, c_in: torch.Tensor | None = None
@@ -233,12 +255,12 @@ class _OnnxRNNModel(nn.Module):
         if self.rnn_type == "lstm":
             x, (h, c) = self.rnn(x.unsqueeze(0), (h_in, c_in))
             x = x.squeeze(0)
-            out = self.mlp(x)
+            out = self.output_module(self.mlp(x))
             return out, h, c
         else:
             x, h = self.rnn(x.unsqueeze(0), h_in)
             x = x.squeeze(0)
-            out = self.mlp(x)
+            out = self.output_module(self.mlp(x))
             return out, h, None
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:

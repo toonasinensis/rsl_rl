@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import tempfile
 
 import torch
@@ -183,9 +184,10 @@ class TestDeparseSaveLoad:
         runner = _build_runner()
         runner.learn(num_learning_iterations=1)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
-            data = torch.load(f.name, weights_only=False, map_location="cpu")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
+            data = torch.load(path, weights_only=False, map_location="cpu")
 
         assert "actor_state_dict" in data
         assert "critic_state_dict" in data
@@ -196,13 +198,14 @@ class TestDeparseSaveLoad:
         runner = _build_runner()
         runner.learn(num_learning_iterations=2)
 
-        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
-            runner.save(f.name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "checkpoint.pt")
+            runner.save(path)
             saved_actor = copy.deepcopy(runner.alg.actor.state_dict())
             saved_critic = copy.deepcopy(runner.alg.critic.state_dict())
 
             runner.learn(num_learning_iterations=2)
-            runner.load(f.name)
+            runner.load(path)
 
         for key, param in runner.alg.actor.state_dict().items():
             assert torch.equal(saved_actor[key], param), f"Actor parameter '{key}' not restored after load"

@@ -89,3 +89,27 @@ def test_construct_actor_with_legacy_backbone_config_wraps_backbone() -> None:
     assert output["actions"].shape == (NUM_ENVS, NUM_ACTIONS)
     assert len(actor.output_distribution_params) == 2
 
+
+def test_wrapper_jit_export_applies_deterministic_distribution_output() -> None:
+    """Exported stochastic wrappers should return deterministic actions, not raw distribution inputs."""
+    obs = _make_obs()
+    cfg = {
+        "class_name": "BackboneMLP",
+        "hidden_dims": [16],
+        "activation": "relu",
+        "distribution_cfg": {
+            "class_name": "HeteroscedasticGaussianDistribution",
+            "init_std": 1.0,
+            "std_type": "scalar",
+        },
+    }
+    actor = construct_actor_with_shell(obs, _obs_groups(), cfg, NUM_ACTIONS)
+    actor.eval()
+
+    expected = actor(obs)["actions"].detach()
+    jit_model = torch.jit.script(actor.as_jit())
+    actual = jit_model(obs["policy"])
+
+    assert actual.shape == (NUM_ENVS, NUM_ACTIONS)
+    assert torch.allclose(actual, expected, atol=1e-5)
+

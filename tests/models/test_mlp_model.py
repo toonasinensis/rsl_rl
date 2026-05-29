@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import torch
 from tensordict import TensorDict
@@ -183,17 +184,18 @@ class TestMLPModelExport:
         onnx_model = actor.as_onnx(verbose=False)
         onnx_model.eval()
 
-        with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "model.onnx")
             torch.onnx.export(
                 onnx_model,
                 onnx_model.get_dummy_inputs(),
-                f.name,
+                path,
                 export_params=True,
                 opset_version=18,
                 input_names=onnx_model.input_names,
                 output_names=onnx_model.output_names,
             )
-            loaded = onnx.load(f.name)
+            loaded = onnx.load(path)
             onnx.checker.check_model(loaded)
 
             assert [i.name for i in loaded.graph.input] == ["obs"]
@@ -217,15 +219,16 @@ class TestMLPModelExport:
         onnx_model = model.as_onnx(verbose=False)
         onnx_model.eval()
 
-        with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "model.onnx")
             torch.onnx.export(
                 onnx_model,
                 onnx_model.get_dummy_inputs(),
-                f.name,
+                path,
                 export_params=True,
                 opset_version=18,
                 input_names=onnx_model.input_names,
                 output_names=onnx_model.output_names,
             )
-            loaded = onnx.load(f.name)
+            loaded = onnx.load(path)
             onnx.checker.check_model(loaded)

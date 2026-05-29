@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import torch
 from tensordict import TensorDict
@@ -193,6 +194,21 @@ class TestCNNModelJITExport:
 
         assert torch.allclose(original_output, jit_output, atol=1e-5), "JIT stochastic CNN export should match original"
 
+    def test_jit_export_with_normalization(self) -> None:
+        """JIT export should work when CNN models include 1D observation normalization."""
+        model, obs = _make_cnn_model(
+            obs_normalization=True,
+            distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+        )
+        model.eval()
+
+        original_output = model(obs).detach()
+
+        jit_model = torch.jit.script(model.as_jit())
+        jit_output = jit_model(obs["policy"], [obs["image"]])
+
+        assert torch.allclose(original_output, jit_output, atol=1e-5)
+
 
 @pytest.mark.filterwarnings("ignore:.*legacy TorchScript.*:DeprecationWarning")
 @pytest.mark.filterwarnings("ignore:.*will be removed.*:DeprecationWarning")
@@ -209,17 +225,18 @@ class TestCNNModelONNXExport:
         onnx_model = model.as_onnx(verbose=False)
         onnx_model.eval()
 
-        with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "model.onnx")
             torch.onnx.export(
                 onnx_model,
                 onnx_model.get_dummy_inputs(),
-                f.name,
+                path,
                 export_params=True,
                 opset_version=18,
                 input_names=onnx_model.input_names,
                 output_names=onnx_model.output_names,
             )
-            loaded = onnx.load(f.name)
+            loaded = onnx.load(path)
             onnx.checker.check_model(loaded)
 
             assert [i.name for i in loaded.graph.input] == ["obs", "image"]

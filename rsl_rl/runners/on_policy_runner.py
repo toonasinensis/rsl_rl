@@ -17,6 +17,34 @@ from rsl_rl.utils import check_nan, resolve_callable
 from rsl_rl.utils.logger import Logger
 
 
+class _ActionOnlyPolicy(torch.nn.Module):
+    """Inference wrapper that returns action tensors from tensor or dict policies."""
+
+    def __init__(self, policy: torch.nn.Module) -> None:
+        """Store the wrapped policy module."""
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        """Run the policy and extract its action tensor."""
+        output = self.policy(*args, **kwargs)
+        if isinstance(output, dict):
+            return output["actions"]
+        return output
+
+    def reset(self, *args, **kwargs) -> None:
+        """Reset recurrent state on the wrapped policy."""
+        self.policy.reset(*args, **kwargs)
+
+    def get_hidden_state(self):
+        """Return recurrent state from the wrapped policy."""
+        return self.policy.get_hidden_state()
+
+    def detach_hidden_state(self, *args, **kwargs) -> None:
+        """Detach recurrent state on the wrapped policy."""
+        self.policy.detach_hidden_state(*args, **kwargs)
+
+
 class OnPolicyRunner:
     """On-policy runner for reinforcement learning algorithms."""
 
@@ -162,7 +190,7 @@ class OnPolicyRunner:
     def get_inference_policy(self, device: str | None = None) -> MLPModel:
         """Return the policy on the requested device for inference."""
         self.alg.eval_mode()  # Switch to evaluation mode (e.g. for dropout)
-        return self.alg.get_policy().to(device)  # type: ignore
+        return _ActionOnlyPolicy(self.alg.get_policy()).to(device)  # type: ignore
 
     def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
         """Export the model to a Torch JIT file."""

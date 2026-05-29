@@ -128,22 +128,22 @@ class StochasticWrapper(nn.Module):
     def as_jit(self):
         """Return TorchScript export module from the backbone.
 
-        For current default Gaussian distributions, deterministic output is
-        identical to backbone output.
+        The export path returns deterministic actions, matching ``forward`` with
+        ``stochastic_output=False``.
         """
         if not hasattr(self.backbone, "as_jit"):
             raise AttributeError("Backbone does not support JIT export via 'as_jit'.")
-        return self.backbone.as_jit()
+        return self.backbone.as_jit(output_module=self.distribution.as_deterministic_output_module())
 
     def as_onnx(self, verbose: bool):
         """Return ONNX export module from the backbone.
 
-        For current default Gaussian distributions, deterministic output is
-        identical to backbone output.
+        The export path returns deterministic actions, matching ``forward`` with
+        ``stochastic_output=False``.
         """
         if not hasattr(self.backbone, "as_onnx"):
             raise AttributeError("Backbone does not support ONNX export via 'as_onnx'.")
-        return self.backbone.as_onnx(verbose)
+        return self.backbone.as_onnx(verbose, output_module=self.distribution.as_deterministic_output_module())
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Forward normalization-stat updates to the backbone."""
