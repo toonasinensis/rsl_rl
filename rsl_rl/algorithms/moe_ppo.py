@@ -15,7 +15,13 @@ from tensordict import TensorDict
 from rsl_rl.env import VecEnv
 from rsl_rl.models import StochasticWrapper, BaseModel, BackboneMoE
 from rsl_rl.storage import RolloutStorage
-from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer, construct_actor_with_shell
+from rsl_rl.utils import (
+    clone_state_dict_tensors,
+    construct_actor_with_shell,
+    resolve_callable,
+    resolve_obs_groups,
+    resolve_optimizer,
+)
 
 
 class MoEPPO:
@@ -468,8 +474,8 @@ class MoEPPO:
     def save(self) -> dict:
         """Return a dict of all models for saving."""
         saved_dict = {
-            "actor_state_dict": self.actor.state_dict(),
-            "critic_state_dict": self.critic.state_dict(),
+            "actor_state_dict": clone_state_dict_tensors(self.actor.state_dict()),
+            "critic_state_dict": clone_state_dict_tensors(self.critic.state_dict()),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
          
@@ -487,6 +493,7 @@ class MoEPPO:
             }
 
         def _load_state_dict_compat(module: nn.Module, state_dict: dict) -> None:
+            state_dict = clone_state_dict_tensors(state_dict)
             try:
                 module.load_state_dict(state_dict, strict=strict)
             except RuntimeError:

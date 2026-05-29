@@ -6,8 +6,17 @@
 """Runners for environment-agent interaction."""
 
 from .on_policy_runner import OnPolicyRunner  # noqa: I001
+from .amp_on_policy_runner import AMPOnPolicyRunner
 from .distillation_runner import DistillationRunner
 from .deparse_policy_runner import DeparseOnPolicyRunner
 from .moe_on_policy_runner import MoEOnPolicyRunner
+from .smp_on_policy_runner import SMPOnPolicyRunner
 
-__all__ = ["DistillationRunner", "OnPolicyRunner", "DeparseOnPolicyRunner", "MoEOnPolicyRunner"]
+__all__ = [
+    "AMPOnPolicyRunner",
+    "DeparseOnPolicyRunner",
+    "DistillationRunner",
+    "MoEOnPolicyRunner",
+    "OnPolicyRunner",
+    "SMPOnPolicyRunner",
+]

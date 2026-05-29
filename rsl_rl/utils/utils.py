@@ -6,14 +6,16 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import pkgutil
 import torch
 import warnings
 from tensordict import TensorDict
 from typing import Any, Callable
-import copy
+
 import rsl_rl
+
 
 def get_param(param: Any, idx: int) -> Any:
     """Get a parameter for the given index.
@@ -201,6 +203,20 @@ def instantiate_from_config(
     return cls(*args, **cfg_copy, **kwargs)
 
 
+def clone_state_dict_tensors(obj: Any) -> Any:
+    """Clone tensors in a state dict so saved inference tensors load normally."""
+    if isinstance(obj, torch.Tensor):
+        with torch.inference_mode(False):
+            return obj.detach().clone()
+    if isinstance(obj, dict):
+        return {key: clone_state_dict_tensors(value) for key, value in obj.items()}
+    if isinstance(obj, tuple):
+        return tuple(clone_state_dict_tensors(value) for value in obj)
+    if isinstance(obj, list):
+        return [clone_state_dict_tensors(value) for value in obj]
+    return obj
+
+
 def resolve_actor_backbone_output_dim(num_actions: int, distribution_cfg: dict) -> int | list[int]:
     """Resolve actor backbone output size from distribution configuration."""
     dist = instantiate_from_config(distribution_cfg, num_actions)
@@ -248,7 +264,7 @@ def construct_actor_with_shell(
         backbone_class = _resolve_class_or_raise(backbone_class_name, "actor.backbone.class_name")
         backbone_output_dim = actor_cfg.pop("backbone_output_dim", None)
         if backbone_output_dim is None:
-            backbone_output_dim = resolve_actor_backbone_output_dim(num_actions, distribution_cfg) # this
+            backbone_output_dim = resolve_actor_backbone_output_dim(num_actions, distribution_cfg)  # this
         try:
             backbone = backbone_class(
                 obs,

@@ -5,10 +5,23 @@
 
 """Learning algorithms."""
 
-from .distillation import Distillation
-from .ppo import PPO
+from .amp_ppo import AMPPPO, AMPDiscriminator
 from .deparse_ppo import DeparsePPO
+from .distillation import Distillation
 from .moe_ppo import MoEPPO
 from .plugins import AuxLossPlugin, ObsReconstructionPlugin
+from .ppo import PPO
+from .smp_ppo import SMPPPO, SMPDiffusionModel
 
-__all__ = ["PPO", "Distillation", "AuxLossPlugin", "ObsReconstructionPlugin", "DeparsePPO", "MoEPPO"]
+__all__ = [
+    "AMPPPO",
+    "PPO",
+    "SMPPPO",
+    "AMPDiscriminator",
+    "AuxLossPlugin",
+    "DeparsePPO",
+    "Distillation",
+    "MoEPPO",
+    "ObsReconstructionPlugin",
+    "SMPDiffusionModel",
+]

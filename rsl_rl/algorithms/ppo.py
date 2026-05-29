@@ -14,7 +14,13 @@ from tensordict import TensorDict
 from rsl_rl.env import VecEnv
 from rsl_rl.models import StochasticWrapper, BaseModel
 from rsl_rl.storage import RolloutStorage
-from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer, construct_actor_with_shell
+from rsl_rl.utils import (
+    clone_state_dict_tensors,
+    construct_actor_with_shell,
+    resolve_callable,
+    resolve_obs_groups,
+    resolve_optimizer,
+)
 
 
 class PPO:
@@ -110,7 +116,7 @@ class PPO:
         self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
         # Compute the actions and values
         self.transition.actions = self.actor(obs, stochastic_output=True)["actions"].detach()
-        self.transition.values = self.critic(obs).detach()
+        self.transition.values = self._critic_value(obs).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
         # Record observations before env.step()
@@ -147,7 +153,7 @@ class PPO:
         """Compute return and advantage targets from stored transitions."""
         st = self.storage
         # Compute value for the last step
-        last_values = self.critic(obs).detach()
+        last_values = self._critic_value(obs).detach()
         # Compute returns and advantages
         advantage = 0
         for step in reversed(range(st.num_transitions_per_env)):
@@ -245,7 +251,7 @@ class PPO:
             train_mode=True,
         )
         actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
-        values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
+        values = self._critic_value(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
         distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
         entropy = self.actor.output_entropy[:original_batch_size]   # type: ignore
 
@@ -342,6 +348,22 @@ class PPO:
             "aux_losses": aux_loss_dict,
         }
 
+    @staticmethod
+    def _extract_actions(model_output: torch.Tensor | dict) -> torch.Tensor:
+        """Extract the primary tensor from tensor- or dict-returning models."""
+        if isinstance(model_output, dict):
+            return model_output["actions"]
+        return model_output
+
+    def _critic_value(
+        self,
+        obs: TensorDict,
+        masks: torch.Tensor | None = None,
+        hidden_state=None,
+    ) -> torch.Tensor:
+        """Normalize dict-returning critic outputs to a value tensor."""
+        return self._extract_actions(self.critic(obs, masks=masks, hidden_state=hidden_state))
+
     def update(self) -> dict[str, float]:
         """Run optimization epochs over stored batches and return mean losses."""
         metrics = self._register_loss_metrics()
@@ -410,8 +432,8 @@ class PPO:
     def save(self) -> dict:
         """Return a dict of all models for saving."""
         saved_dict = {
-            "actor_state_dict": self.actor.state_dict(),
-            "critic_state_dict": self.critic.state_dict(),
+            "actor_state_dict": clone_state_dict_tensors(self.actor.state_dict()),
+            "critic_state_dict": clone_state_dict_tensors(self.critic.state_dict()),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
          
@@ -430,9 +452,9 @@ class PPO:
 
         # Load the specified models
         if load_cfg.get("actor"):
-            self.actor.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
+            self.actor.load_state_dict(clone_state_dict_tensors(loaded_dict["actor_state_dict"]), strict=strict)
         if load_cfg.get("critic"):
-            self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
+            self.critic.load_state_dict(clone_state_dict_tensors(loaded_dict["critic_state_dict"]), strict=strict)
         if load_cfg.get("optimizer"):
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
          
