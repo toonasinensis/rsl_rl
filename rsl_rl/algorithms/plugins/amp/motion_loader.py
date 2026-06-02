@@ -1,12 +1,71 @@
 from __future__ import annotations
-import math
 import numpy as np
 import os
 import torch
 from collections.abc import Sequence
 from tqdm import tqdm
 
-import mjlab.utils.lab_api.math as math_utils
+#region math utils
+def _quat_conjugate(quat: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = quat.unbind(dim=-1)
+    return torch.stack((w, -x, -y, -z), dim=-1)
+
+
+def _quat_normalize(quat: torch.Tensor) -> torch.Tensor:
+    return quat / torch.linalg.vector_norm(quat, dim=-1, keepdim=True).clamp_min(1e-12)
+
+
+def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    w1, x1, y1, z1 = q1.unbind(dim=-1)
+    w2, x2, y2, z2 = q2.unbind(dim=-1)
+    return torch.stack(
+        (
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ),
+        dim=-1,
+    )
+
+
+def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    vec_quat = torch.cat((torch.zeros_like(vec[..., :1]), vec), dim=-1)
+    quat_conj = _quat_conjugate(quat)
+    return _quat_mul(_quat_mul(quat, vec_quat), quat_conj)[..., 1:]
+
+
+def _quat_apply_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    return _quat_apply(_quat_conjugate(_quat_normalize(quat)), vec)
+
+
+def _matrix_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    quat = _quat_normalize(quat)
+    w, x, y, z = quat.unbind(dim=-1)
+    ww, xx, yy, zz = w * w, x * x, y * y, z * z
+    wx, wy, wz = w * x, w * y, w * z
+    xy, xz, yz = x * y, x * z, y * z
+    return torch.stack(
+        (
+            torch.stack((1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)), dim=-1),
+            torch.stack((2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)), dim=-1),
+            torch.stack((2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)), dim=-1),
+        ),
+        dim=-2,
+    )
+
+
+def _subtract_frame_transforms(
+    parent_pos_w: torch.Tensor,
+    parent_quat_w: torch.Tensor,
+    child_pos_w: torch.Tensor,
+    child_quat_w: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rel_pos_w = child_pos_w - parent_pos_w
+    rel_pos_parent = _quat_apply_inverse(parent_quat_w, rel_pos_w)
+    rel_quat_parent = _quat_mul(_quat_conjugate(_quat_normalize(parent_quat_w)), child_quat_w)
+    return rel_pos_parent, _quat_normalize(rel_quat_parent)
+#endregion math utils
 
 
 class AMPLoader:
@@ -98,7 +157,7 @@ class AMPLoader:
 
                 # 计算body相对于anchor的位置和姿态 (局部坐标系)
                 tgt_robot_body_pos_b, tgt_robot_body_quat_b = (
-                    math_utils.subtract_frame_transforms(
+                    _subtract_frame_transforms(
                         tgt_anchor_pos_w,
                         tgt_anchor_quat_w,
                         tgt_body_pos_w,
@@ -107,16 +166,16 @@ class AMPLoader:
                 )
 
                 # 将姿态四元数转换为旋转矩阵的前两列
-                mat = math_utils.matrix_from_quat(tgt_robot_body_quat_b)
+                mat = _matrix_from_quat(tgt_robot_body_quat_b)
                 tgt_robot_body_ori_b = mat[..., :, :2].reshape(self._num_bodies, 6)
 
                 # 将速度转换到每个body自己的局部坐标系
-                tgt_body_lin_vel_b = math_utils.quat_apply_inverse(
+                tgt_body_lin_vel_b = _quat_apply_inverse(
                     tgt_body_quat_w,
                     tgt_body_lin_vel_w,
                 )
 
-                tgt_body_ang_vel_b = math_utils.quat_apply_inverse(
+                tgt_body_ang_vel_b = _quat_apply_inverse(
                     tgt_body_quat_w,
                     tgt_body_ang_vel_w,
                 )
