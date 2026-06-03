@@ -42,7 +42,8 @@ class AMPDiscriminator(nn.Module):
         """Initialize the discriminator network and optional observation normalizers."""
         super().__init__()
         self.obs_groups = obs_groups[obs_set]
-        input_dim = sum(obs[group].shape[-1] for group in self.obs_groups)
+        self.single_input_dim = sum(obs[group].shape[-1] for group in self.obs_groups)
+        input_dim = 2 * self.single_input_dim
 
         self.obs_normalization = obs_normalization
         self.obs_normalizers = (
@@ -52,11 +53,10 @@ class AMPDiscriminator(nn.Module):
         )
         self.mlp = MLP(input_dim, 1, hidden_dims, activation)
 
-    def extract_input(self, obs: TensorDict | torch.Tensor) -> torch.Tensor:
-        """Return the concatenated AMP observation tensor."""
+    def _extract_features(self, obs: TensorDict | torch.Tensor) -> torch.Tensor:
+        """Return a flattened AMP feature tensor for one observation frame."""
         if isinstance(obs, torch.Tensor):
             return obs
-
         inputs = []
         for group in self.obs_groups:
             value = obs[group]
@@ -65,15 +65,35 @@ class AMPDiscriminator(nn.Module):
             inputs.append(value)
         return torch.cat(inputs, dim=-1)
 
+    def extract_input(
+        self,
+        obs: TensorDict | torch.Tensor,
+        next_obs: TensorDict | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the default transition input ``[state, next_state]`` for AMP discrimination."""
+        if isinstance(obs, torch.Tensor) and next_obs is None and obs.shape[-1] == 2 * self.single_input_dim:
+            return obs
+        current = self._extract_features(obs)
+        if next_obs is None:
+            next_inputs = current
+        else:
+            next_inputs = self._extract_features(next_obs)
+        inputs = [current, next_inputs]
+        return torch.cat(inputs, dim=-1)
+
     def update_normalization(self, obs: TensorDict) -> None:
         """Update running statistics for AMP observations."""
         if self.obs_normalizers is not None:
             for group in self.obs_groups:
                 self.obs_normalizers[group].update(obs[group])
 
-    def forward(self, obs: TensorDict | torch.Tensor) -> torch.Tensor:
-        """Return discriminator logits. Positive logits indicate expert-like samples."""
-        return self.mlp(self.extract_input(obs))
+    def forward(
+        self,
+        obs: TensorDict | torch.Tensor,
+        next_obs: TensorDict | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return discriminator logits. Positive logits indicate expert-like transitions."""
+        return self.mlp(self.extract_input(obs, next_obs))
 
 
 class AMPPPO(PPO):
@@ -176,25 +196,40 @@ class AMPPPO(PPO):
     ) -> None:
         """Add AMP style reward before storing the transition."""
         self.amp_discriminator.update_normalization(obs)
-        self.amp_rewards = self.compute_amp_rewards(obs)
+        current_obs = self.transition.observations if self.transition.observations is not None else obs
+        self.amp_rewards = self.compute_amp_rewards(current_obs, obs)
         super().process_env_step(obs, rewards + self.amp_rewards, dones, extras)
 
-    def compute_amp_rewards(self, obs: TensorDict) -> torch.Tensor:
+    def compute_amp_rewards(self, obs: TensorDict, next_obs: TensorDict | None = None) -> torch.Tensor:
         """Compute the discriminator reward through the shared AMP plugin core."""
-        return self._amp_plugin_core.compute_reward_from_observations(obs)
+        current_obs = obs
+        next_observations = next_obs
+        if next_observations is None:
+            transition_obs = self.transition.observations
+            if transition_obs is not None and transition_obs is not obs:
+                current_obs = transition_obs
+                next_observations = obs
+            else:
+                next_observations = obs
+        return self._amp_plugin_core.compute_reward_from_observations(current_obs, next_observations)
 
     def _compute_loss(self, mb_forward_results: dict, mb_rollout_data: dict) -> dict:
         """Compute PPO and AMP discriminator losses."""
         loss_results = super()._compute_loss(mb_forward_results, mb_rollout_data)
-        amp_loss_dict = self._compute_amp_loss(mb_rollout_data["batch"].observations)
+        batch = mb_rollout_data["batch"]
+        amp_loss_dict = self._compute_amp_loss(batch.observations, batch.next_observations)
         loss_results["loss"] = loss_results["loss"] + self.amp_loss_coef * amp_loss_dict["amp_loss"]
         loss_results["amp_loss_dict"] = amp_loss_dict
         return loss_results
 
-    def _compute_amp_loss(self, policy_obs: TensorDict) -> dict[str, torch.Tensor]:
-        """Compute binary discriminator loss on policy and expert AMP observations."""
+    def _compute_amp_loss(
+        self,
+        policy_obs: TensorDict,
+        next_policy_obs: TensorDict | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute binary discriminator loss on policy and expert AMP transitions."""
         amp_loss_dict = self._amp_plugin_core.compute_loss_from_policy_obs(
-            policy_obs,
+            (policy_obs, next_policy_obs) if next_policy_obs is not None else policy_obs,
             use_policy_replay=False,
             detach_metrics=False,
         )

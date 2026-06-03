@@ -32,7 +32,13 @@ def _make_obs(num_envs: int = NUM_ENVS) -> TensorDict:
 
 
 def _make_expert_data(num_samples: int = 64) -> TensorDict:
-    return TensorDict({"amp": torch.randn(num_samples, AMP_DIM) + 1.0}, batch_size=[num_samples])
+    return TensorDict(
+        {
+            "amp": torch.randn(num_samples, AMP_DIM) + 1.0,
+            "next_amp": torch.randn(num_samples, AMP_DIM) + 1.5,
+        },
+        batch_size=[num_samples],
+    )
 
 
 def _build_amp_ppo(**amp_overrides: object) -> tuple[AMPPPO, TensorDict]:
@@ -97,9 +103,10 @@ class TestAMPReward:
     def test_amp_ppo_reward_helper_delegates_to_internal_plugin_core(self) -> None:
         """Legacy AMPPPO reward computation should match the shared AMPPlugin core."""
         ppo, obs = _build_amp_ppo()
+        next_obs = _make_obs()
 
-        amp_rewards = ppo.compute_amp_rewards(obs)
-        plugin_rewards = ppo._amp_plugin_core.compute_reward_from_observations(obs)
+        amp_rewards = ppo.compute_amp_rewards(obs, next_obs)
+        plugin_rewards = ppo._amp_plugin_core.compute_reward_from_observations(obs, next_obs)
 
         assert torch.allclose(amp_rewards, plugin_rewards)
 
@@ -122,8 +129,9 @@ class TestAMPLoss:
     def test_amp_loss_has_gradients_for_discriminator(self) -> None:
         """AMP discriminator loss should backpropagate into discriminator parameters."""
         ppo, obs = _build_amp_ppo()
+        next_obs = _make_obs()
 
-        loss_dict = ppo._compute_amp_loss(obs)
+        loss_dict = ppo._compute_amp_loss(obs, next_obs)
         ppo.optimizer.zero_grad()
         loss_dict["amp_loss"].backward()
 

@@ -135,8 +135,11 @@ class AMPPlugin(nn.Module, PPOPlugin):
         if getattr(self, "_embedded_loss_handled_externally", False):
             return {}
 
+        policy_obs: TensorDict | tuple[TensorDict, TensorDict] = batch.observations
+        if getattr(batch, "next_observations", None) is not None:
+            policy_obs = (batch.observations, batch.next_observations)
         amp_loss_dict = self.compute_loss_from_policy_obs(
-            batch.observations,
+            policy_obs,
             use_policy_replay=True,
             detach_metrics=True,
         )
@@ -236,17 +239,21 @@ class AMPPlugin(nn.Module, PPOPlugin):
         """Compute AMP reward decomposition for a current/next observation pair."""
         return self._compute_reward_components(amp_obs, next_amp_obs, task_rewards)
 
-    def compute_reward_from_observations(self, obs: TensorDict | torch.Tensor) -> torch.Tensor:
-        """Compute AMP-only reward from observations for legacy AMPPPO-style integration."""
-        if isinstance(obs, TensorDict):
-            amp_obs = obs.get(self.amp_obs_key)
-            if amp_obs is None:
-                raise KeyError(f"Observation dict does not contain AMP key '{self.amp_obs_key}'.")
-        else:
-            amp_obs = obs
+    def compute_reward_from_observations(
+        self,
+        obs: TensorDict | torch.Tensor,
+        next_obs: TensorDict | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute AMP-only reward, defaulting to transition inputs when both frames are available."""
+        amp_obs = self._resolve_amp_tensor(obs)
+        if amp_obs is None:
+            raise KeyError(f"Observation dict does not contain AMP key '{self.amp_obs_key}'.")
+        next_amp_obs = self._resolve_amp_tensor(next_obs)
+        if next_amp_obs is None:
+            next_amp_obs = amp_obs
 
         task_rewards = torch.zeros(amp_obs.shape[0], device=amp_obs.device, dtype=amp_obs.dtype)
-        reward_components = self.compute_reward_components(amp_obs, amp_obs, task_rewards)
+        reward_components = self.compute_reward_components(amp_obs, next_amp_obs, task_rewards)
         return reward_components["amp_reward"].reshape(-1)
 
     def _compute_reward_components(
@@ -271,7 +278,8 @@ class AMPPlugin(nn.Module, PPOPlugin):
             }
 
         with torch.no_grad():
-            logits = self.discriminator(next_amp_obs)
+            inputs = self._extract_discriminator_input(amp_obs, next_amp_obs)
+            logits = self.discriminator(inputs)
             expert_prob = torch.sigmoid(logits)
             amp_reward = self.reward_scale * (
                 -torch.log(torch.clamp(1.0 - expert_prob, min=1.0e-4))
@@ -282,28 +290,19 @@ class AMPPlugin(nn.Module, PPOPlugin):
             "mixed_reward": (task_rewards + amp_reward).detach().reshape(-1),
         }
 
-    def _sample_policy_training_obs(self, batch) -> torch.Tensor | None:
-        amp_obs = batch.observations.get(self.amp_obs_key)
-        batch_size = batch.observations.batch_size[0]
-        if amp_obs is not None:
-            batch_size = amp_obs.reshape(-1, amp_obs.shape[-1]).shape[0]
+    def _sample_policy_training_obs(self, batch) -> tuple[torch.Tensor, torch.Tensor] | None:
+        policy_obs: TensorDict | tuple[TensorDict, TensorDict] = batch.observations
+        if getattr(batch, "next_observations", None) is not None:
+            policy_obs = (batch.observations, batch.next_observations)
+        return self._resolve_policy_training_obs(policy_obs, use_policy_replay=True)
 
-        policy_pairs = self.provider.sample_policy_pairs(batch_size)
-        if policy_pairs is not None:
-            _, policy_next_obs = policy_pairs
-            return policy_next_obs.detach().reshape(-1, policy_next_obs.shape[-1])
-
-        if amp_obs is None:
-            return None
-        return amp_obs.detach().reshape(-1, amp_obs.shape[-1])
-
-    def _sample_expert_training_obs(self, batch_size: int) -> torch.Tensor:
-        _, expert_next_obs = self.provider.sample_expert_pairs(batch_size)
-        return expert_next_obs.detach().reshape(-1, expert_next_obs.shape[-1])
+    def _sample_expert_training_obs(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        expert_obs, expert_next_obs = self.provider.sample_expert_pairs(batch_size)
+        return self._flatten_amp_tensor(expert_obs), self._flatten_amp_tensor(expert_next_obs)
 
     def compute_loss_from_policy_obs(
         self,
-        policy_obs: TensorDict | torch.Tensor,
+        policy_obs: TensorDict | torch.Tensor | tuple[TensorDict | torch.Tensor, TensorDict | torch.Tensor | None],
         *,
         use_policy_replay: bool = False,
         detach_metrics: bool = True,
@@ -325,46 +324,61 @@ class AMPPlugin(nn.Module, PPOPlugin):
 
     def _resolve_policy_training_obs(
         self,
-        policy_obs: TensorDict | torch.Tensor,
+        policy_obs: TensorDict | torch.Tensor | tuple[TensorDict | torch.Tensor, TensorDict | torch.Tensor | None],
         *,
         use_policy_replay: bool,
-    ) -> torch.Tensor | None:
-        if isinstance(policy_obs, torch.Tensor):
-            policy_train_obs = policy_obs
-            batch_size = policy_train_obs.reshape(-1, policy_train_obs.shape[-1]).shape[0]
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if isinstance(policy_obs, tuple):
+            current_obs, next_obs = policy_obs
+            current_amp_obs = self._resolve_amp_tensor(current_obs)
+            next_amp_obs = self._resolve_amp_tensor(next_obs)
+            if current_amp_obs is None:
+                return None
+            batch_size = self._flatten_amp_tensor(current_amp_obs).shape[0]
             if use_policy_replay:
                 policy_pairs = self.provider.sample_policy_pairs(batch_size)
                 if policy_pairs is not None:
-                    _, policy_next_obs = policy_pairs
-                    return policy_next_obs.detach().reshape(-1, policy_next_obs.shape[-1])
-            return policy_train_obs.detach().reshape(-1, policy_train_obs.shape[-1])
+                    policy_obs, policy_next_obs = policy_pairs
+                    return self._flatten_amp_tensor(policy_obs), self._flatten_amp_tensor(policy_next_obs)
+            policy_next_obs = current_amp_obs if next_amp_obs is None else next_amp_obs
+            return self._flatten_amp_tensor(current_amp_obs), self._flatten_amp_tensor(policy_next_obs)
+
+        if isinstance(policy_obs, torch.Tensor):
+            current_amp_obs = policy_obs
+            batch_size = self._flatten_amp_tensor(current_amp_obs).shape[0]
+            if use_policy_replay:
+                policy_pairs = self.provider.sample_policy_pairs(batch_size)
+                if policy_pairs is not None:
+                    policy_obs, policy_next_obs = policy_pairs
+                    return self._flatten_amp_tensor(policy_obs), self._flatten_amp_tensor(policy_next_obs)
+            flattened = self._flatten_amp_tensor(current_amp_obs)
+            return flattened, flattened
 
         amp_obs = policy_obs.get(self.amp_obs_key)
-        batch_size = policy_obs.batch_size[0]
-        if amp_obs is not None:
-            batch_size = amp_obs.reshape(-1, amp_obs.shape[-1]).shape[0]
+        if amp_obs is None:
+            return None
+        batch_size = self._flatten_amp_tensor(amp_obs).shape[0]
 
         if use_policy_replay:
             policy_pairs = self.provider.sample_policy_pairs(batch_size)
             if policy_pairs is not None:
-                _, policy_next_obs = policy_pairs
-                return policy_next_obs.detach().reshape(-1, policy_next_obs.shape[-1])
+                policy_obs, policy_next_obs = policy_pairs
+                return self._flatten_amp_tensor(policy_obs), self._flatten_amp_tensor(policy_next_obs)
 
-        if amp_obs is None:
-            return None
-        return amp_obs.detach().reshape(-1, amp_obs.shape[-1])
+        flattened = self._flatten_amp_tensor(amp_obs)
+        return flattened, flattened
 
     def _compute_discriminator_loss(
         self,
-        policy_train_obs: torch.Tensor,
-        expert_train_obs: torch.Tensor,
+        policy_train_obs: tuple[torch.Tensor, torch.Tensor],
+        expert_train_obs: tuple[torch.Tensor, torch.Tensor],
         *,
         detach_metrics: bool = True,
     ) -> dict[str, torch.Tensor]:
         assert self.discriminator is not None
 
-        policy_inputs = self._extract_discriminator_input(policy_train_obs).detach()
-        expert_inputs = self._extract_discriminator_input(expert_train_obs).detach()
+        policy_inputs = self._extract_discriminator_input(*policy_train_obs).detach()
+        expert_inputs = self._extract_discriminator_input(*expert_train_obs).detach()
 
         policy_logits = self.discriminator(policy_inputs)
         expert_logits = self.discriminator(expert_inputs)
@@ -449,10 +463,31 @@ class AMPPlugin(nn.Module, PPOPlugin):
                     min_std = torch.clamp_min(min_std.min(), 1.0e-6).expand_as(target)
                 target.clamp_(min=torch.log(torch.clamp_min(min_std, 1.0e-6)))
 
-    def _extract_discriminator_input(self, obs: torch.Tensor) -> torch.Tensor:
-        if hasattr(self.discriminator, "extract_input"):
-            return self.discriminator.extract_input(obs)
+    def _resolve_amp_tensor(self, obs: TensorDict | torch.Tensor | None) -> torch.Tensor | None:
+        if obs is None:
+            return None
+        if isinstance(obs, TensorDict):
+            return obs.get(self.amp_obs_key)
         return obs
+
+    @staticmethod
+    def _flatten_amp_tensor(obs: torch.Tensor) -> torch.Tensor:
+        return obs.detach().reshape(-1, obs.shape[-1])
+
+    def _extract_discriminator_input(
+        self,
+        obs: torch.Tensor,
+        next_obs: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if hasattr(self.discriminator, "extract_input"):
+            try:
+                return self.discriminator.extract_input(obs, next_obs)
+            except TypeError:
+                if next_obs is None:
+                    return self.discriminator.extract_input(obs)
+        if next_obs is None:
+            return obs
+        return torch.cat((obs, next_obs), dim=-1)
 
     @staticmethod
     def _as_step_metric_tensor(value: torch.Tensor) -> torch.Tensor:

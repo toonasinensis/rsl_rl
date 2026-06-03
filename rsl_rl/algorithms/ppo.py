@@ -138,6 +138,7 @@ class PPO:
 
         # Record the rewards and dones
         # Note: We clone here because later on we bootstrap the rewards based on timeouts
+        self.transition.next_observations = obs
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
 

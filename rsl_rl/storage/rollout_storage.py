@@ -33,6 +33,9 @@ class RolloutStorage:
             self.observations: TensorDict | None = None
             """Observations at the current step."""
 
+            self.next_observations: TensorDict | None = None
+            """Observations at the next step."""
+
             self.actions: torch.Tensor | None = None
             """Actions taken at the current step."""
 
@@ -84,10 +87,14 @@ class RolloutStorage:
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
+            next_observations: TensorDict | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
             """Batch of observations."""
+
+            self.next_observations: TensorDict | None = next_observations
+            """Batch of next-step observations."""
 
             # For reinforcement learning
             self.actions: torch.Tensor | None = actions
@@ -144,6 +151,11 @@ class RolloutStorage:
             batch_size=[num_transitions_per_env, num_envs],
             device=self.device,
         )
+        self.next_observations = TensorDict(
+            {key: torch.zeros(num_transitions_per_env, *value.shape, device=device) for key, value in obs.items()},
+            batch_size=[num_transitions_per_env, num_envs],
+            device=self.device,
+        )
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
@@ -175,6 +187,8 @@ class RolloutStorage:
 
         # Core
         self.observations[self.step].copy_(transition.observations)
+        next_observations = transition.next_observations if transition.next_observations is not None else transition.observations
+        self.next_observations[self.step].copy_(next_observations)
         self.actions[self.step].copy_(transition.actions)  # type: ignore
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
@@ -229,6 +243,7 @@ class RolloutStorage:
 
         # Flatten the data
         observations = self.observations.flatten(0, 1)
+        next_observations = self.next_observations.flatten(0, 1)
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
@@ -246,6 +261,7 @@ class RolloutStorage:
                 # Yield the mini-batch
                 yield RolloutStorage.Batch(
                     observations=observations[batch_idx],  # type: ignore
+                    next_observations=next_observations[batch_idx],  # type: ignore
                     actions=actions[batch_idx],
                     values=values[batch_idx],
                     advantages=advantages[batch_idx],
@@ -262,6 +278,7 @@ class RolloutStorage:
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
+        padded_next_obs_trajectories, _ = split_and_pad_trajectories(self.next_observations, self.dones)
         mini_batch_size = self.num_envs // num_mini_batches
 
         for ep in range(num_epochs):
@@ -313,6 +330,7 @@ class RolloutStorage:
                 # Yield the mini-batch
                 yield RolloutStorage.Batch(
                     observations=padded_obs_trajectories[:, first_traj:last_traj],  # type: ignore
+                    next_observations=padded_next_obs_trajectories[:, first_traj:last_traj],  # type: ignore
                     actions=self.actions[:, start:stop],
                     values=self.values[:, start:stop],
                     advantages=self.advantages[:, start:stop],

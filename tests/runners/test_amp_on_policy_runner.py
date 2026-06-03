@@ -59,7 +59,10 @@ class DummyAMPEnv(VecEnv):
     def sample_amp_expert_observations(self, batch_size: int) -> TensorDict:
         """Sample random expert AMP observations."""
         return TensorDict(
-            {"amp": torch.randn(batch_size, AMP_DIM, device=self.device) + 1.0},
+            {
+                "amp": torch.randn(batch_size, AMP_DIM, device=self.device) + 1.0,
+                "next_amp": torch.randn(batch_size, AMP_DIM, device=self.device) + 1.5,
+            },
             batch_size=[batch_size],
             device=self.device,
         )
@@ -67,7 +70,10 @@ class DummyAMPEnv(VecEnv):
     def get_amp_expert_observations(self) -> TensorDict:
         """Return a fixed pool of expert AMP observations."""
         return TensorDict(
-            {"amp": torch.randn(24, AMP_DIM, device=self.device) + 2.0},
+            {
+                "amp": torch.randn(24, AMP_DIM, device=self.device) + 2.0,
+                "next_amp": torch.randn(24, AMP_DIM, device=self.device) + 2.5,
+            },
             batch_size=[24],
             device=self.device,
         )
