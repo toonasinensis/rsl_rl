@@ -159,6 +159,7 @@ class SMPPPO(PPO):
         smp_cfg: dict | None = None,
         rnd_cfg: dict | None = None,
         symmetry_cfg: dict | None = None,
+        plugins=None,
         multi_gpu_cfg: dict | None = None,
     ) -> None:
         """Initialize PPO components and the SMP diffusion model."""
@@ -183,6 +184,7 @@ class SMPPPO(PPO):
             device=device,
             rnd_cfg=rnd_cfg,
             symmetry_cfg=symmetry_cfg,
+            plugins=plugins,
             multi_gpu_cfg=multi_gpu_cfg,
         )
 
@@ -325,7 +327,8 @@ class SMPPPO(PPO):
         )  # type: ignore
 
         cfg["algorithm"].pop("symmetry_cfg", None)
-        cfg["algorithm"].pop("aux_modules", None)
+        plugin_cfgs = PPO._resolve_plugin_cfgs(cfg["algorithm"])
+        plugins = PPO._build_plugins(plugin_cfgs, obs)
 
         actor = construct_actor_with_shell(obs, cfg["obs_groups"], cfg["actor"], env.num_actions).to(device)
         print(f"Actor Model: {actor}")
@@ -346,9 +349,11 @@ class SMPPPO(PPO):
             smp_model,
             device=device,
             smp_cfg=smp_cfg,
+            plugins=plugins,
             **cfg["algorithm"],
-            multi_gpu_cfg=cfg["multi_gpu"],
+            multi_gpu_cfg=cfg.get("multi_gpu"),
         )
+        PPO._initialize_plugins(alg, env)
         return alg
 
     def broadcast_parameters(self) -> None:

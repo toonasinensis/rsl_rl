@@ -3,12 +3,18 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Auxiliary-loss plugins for extending the PPO training objective."""
+"""Plugins for extending PPO and related training workflows."""
 
-from .base import AuxLossPlugin
+from .amp_plugin import AMPPlugin
+from .amp_provider import AMPExpertProvider, ExternalAMPProvider
+from .base import AuxLossPlugin, PPOPlugin
 from .obs_reconstruction import ObsReconstructionPlugin
 
 __all__ = [
+    "AMPExpertProvider",
+    "ExternalAMPProvider",
+    "AMPPlugin",
+    "PPOPlugin",
     "AuxLossPlugin",
     "ObsReconstructionPlugin",
 ]

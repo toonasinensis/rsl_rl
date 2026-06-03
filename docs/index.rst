@@ -9,6 +9,9 @@ RSL-RL Documentation
    guide/overview
    guide/installation
    guide/configuration
+   guide/project_architecture
+   guide/amp_migration_design
+   guide/amp_implementation_plan
    guide/contribution
 
 .. toctree::

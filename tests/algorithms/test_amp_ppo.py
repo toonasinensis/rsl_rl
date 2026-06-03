@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 from tensordict import TensorDict
 
-from rsl_rl.algorithms import AMPPPO, AMPDiscriminator
+from rsl_rl.algorithms import AMPPPO, AMPDiscriminator, AMPPlugin, ExternalAMPProvider
 from rsl_rl.models import BackboneMLP, StochasticWrapper
 from rsl_rl.storage import RolloutStorage
 
@@ -74,6 +74,35 @@ def _build_amp_ppo(**amp_overrides: object) -> tuple[AMPPPO, TensorDict]:
 class TestAMPReward:
     """Tests for AMP reward shaping."""
 
+    def test_amp_ppo_constructs_internal_plugin_core(self) -> None:
+        """Legacy AMPPPO should reuse an internal AMPPlugin core for convergence."""
+        ppo, _obs = _build_amp_ppo()
+
+        assert isinstance(ppo._amp_plugin_core, AMPPlugin)
+        assert ppo._amp_plugin_core.discriminator is ppo.amp_discriminator
+        assert isinstance(ppo._amp_plugin_core.provider, ExternalAMPProvider)
+        assert ppo._amp_plugin_core.provider.expert_data is not None
+
+    def test_legacy_amp_handles_delegate_to_internal_provider(self) -> None:
+        """Legacy AMPPPO expert-data handles should reflect the internal provider state."""
+        ppo, _obs = _build_amp_ppo(expert_data=None)
+        expert_data = _make_expert_data(12)
+
+        ppo.amp_expert_data = expert_data
+
+        assert ppo._amp_plugin_core.provider.expert_data is not None
+        assert ppo.amp_expert_data is not None
+        assert ppo.amp_expert_data.batch_size[0] == 12
+
+    def test_amp_ppo_reward_helper_delegates_to_internal_plugin_core(self) -> None:
+        """Legacy AMPPPO reward computation should match the shared AMPPlugin core."""
+        ppo, obs = _build_amp_ppo()
+
+        amp_rewards = ppo.compute_amp_rewards(obs)
+        plugin_rewards = ppo._amp_plugin_core.compute_reward_from_observations(obs)
+
+        assert torch.allclose(amp_rewards, plugin_rewards)
+
     def test_process_env_step_adds_amp_reward(self) -> None:
         """Stored rollout rewards should include positive AMP rewards."""
         ppo, obs = _build_amp_ppo()
@@ -123,3 +152,26 @@ class TestAMPLoss:
         assert changed
         assert "amp_loss_dict/amp_loss" in loss_dict
         assert "amp_loss_dict/expert_loss" in loss_dict
+        assert "AMP/amp_loss" in loss_dict
+        assert "AMP/policy_accuracy" in loss_dict
+
+
+class TestAMPSaveLoad:
+    """Tests for AMPPPO checkpoint compatibility during convergence."""
+
+    def test_save_and_load_preserve_legacy_and_plugin_amp_state(self) -> None:
+        """AMPPPO should keep legacy checkpoint keys while persisting plugin/provider state."""
+        ppo, _obs = _build_amp_ppo()
+
+        saved_dict = ppo.save()
+
+        assert "amp_discriminator_state_dict" in saved_dict
+        assert "plugin_state_dicts" in saved_dict
+        assert "plugin_extra_state" in saved_dict
+
+        restored_ppo, _ = _build_amp_ppo(expert_data=None)
+        restored_ppo.load(saved_dict, load_cfg=None, strict=True)
+
+        assert restored_ppo.amp_expert_data is not None
+        assert restored_ppo._amp_plugin_core.provider.expert_data is not None
+        assert restored_ppo.amp_expert_data.batch_size == ppo.amp_expert_data.batch_size

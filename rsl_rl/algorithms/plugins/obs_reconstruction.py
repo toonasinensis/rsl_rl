@@ -29,7 +29,7 @@ class ObsReconstructionPlugin(AuxLossPlugin):
 
     Configuration example::
 
-        "aux_modules": [
+        "plugins": [
             {
                 "class_name": "rsl_rl.algorithms.plugins:ObsReconstructionPlugin",
                 "target_groups": ["policy"],
@@ -55,7 +55,7 @@ class ObsReconstructionPlugin(AuxLossPlugin):
     def __init__(
         self,
         target_groups: list[str],
-        obs: TensorDict,
+        obs: TensorDict | None = None,
         hidden_dims: list[int] = (256, 128),
         weight: float = 1.0,
         detach_latent: bool = True,
@@ -70,7 +70,9 @@ class ObsReconstructionPlugin(AuxLossPlugin):
         self.activation = activation
 
         # Store raw obs dims so setup() can build the decoders
-        self._obs_dims: dict[str, int] = {g: obs[g].shape[-1] for g in self.target_groups}
+        self._obs_dims: dict[str, int] = {}
+        if obs is not None:
+            self._obs_dims = {g: obs[g].shape[-1] for g in self.target_groups}
 
         # Decoder MLPs — built lazily in setup() once the actor latent dim is known
         self.decoders: nn.ModuleDict | None = None
@@ -80,7 +82,8 @@ class ObsReconstructionPlugin(AuxLossPlugin):
 
         Args:
             actor: Constructed actor (expected to have ``actor.backbone.encoder_latent_dim``).
-            obs: Sample observation TensorDict (unused here; dims were captured in ``__init__``).
+            obs: Sample observation TensorDict used to resolve target dimensions when they
+                were not provided at construction time.
 
         Raises:
             ValueError: If the actor backbone does not expose ``encoder_latent_dim``
@@ -94,6 +97,8 @@ class ObsReconstructionPlugin(AuxLossPlugin):
                 "'encoder_latent_dim' (e.g. SubEncoderMLPModel). "
                 f"Got backbone type: {type(backbone).__name__}."
             )
+        if not self._obs_dims:
+            self._obs_dims = {g: obs[g].shape[-1] for g in self.target_groups}
         self.decoders = nn.ModuleDict(
             {
                 g: MLP(latent_dim, obs_dim, self.hidden_dims, self.activation)

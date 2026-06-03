@@ -10,7 +10,7 @@ import os
 import time
 import torch
 
-from rsl_rl.algorithms import AMPPPO, PPO, SMPPPO, MoEPPO
+from rsl_rl.algorithms import AMPPPO, AMPPlugin, PPO, SMPPPO, MoEPPO
 from rsl_rl.env import VecEnv
 from rsl_rl.models import MLPModel
 from rsl_rl.utils import check_nan, resolve_callable
@@ -66,6 +66,7 @@ class OnPolicyRunner:
         # Create the algorithm
         alg_class: type[PPO] = resolve_callable(self.cfg["algorithm"]["class_name"])  # type: ignore
         self.alg = alg_class.construct_algorithm(obs, self.env, self.cfg, self.device)
+        self._configure_amp_sources()
 
         # Create the logger
         self.logger = Logger(
@@ -111,6 +112,8 @@ class OnPolicyRunner:
                 for _ in range(self.cfg["num_steps_per_env"]):
                     # Sample actions
                     actions = self.alg.act(obs)
+                    for plugin in getattr(self.alg, "plugins", ()):
+                        plugin.on_after_act(self, obs)
                     # Step the environment
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     # Check for NaN values from the environment
@@ -118,6 +121,8 @@ class OnPolicyRunner:
                         check_nan(obs, rewards, dones)
                     # Move to device
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    for plugin in getattr(self.alg, "plugins", ()):
+                        rewards = plugin.on_after_step(self, obs, rewards, dones, extras)
                     # Process the step
                     self.alg.process_env_step(obs, rewards, dones, extras)
                     # Extract intrinsic rewards if RND is used (only for logging)
@@ -230,6 +235,43 @@ class OnPolicyRunner:
     def add_git_repo_to_log(self, repo_file_path: str) -> None:
         """Register a repository path whose git status should be logged."""
         self.logger.git_status_repos.append(repo_file_path)
+
+    def _configure_amp_sources(self) -> None:
+        """Attach runner- or env-provided AMP expert sources to legacy or plugin AMP paths."""
+        amp_runner_cfg = self.cfg.get("amp_runner", {})
+
+        expert_data = amp_runner_cfg.get("expert_data")
+        if expert_data is None and amp_runner_cfg.get("expert_data_path") is not None:
+            expert_data = torch.load(amp_runner_cfg["expert_data_path"], weights_only=False, map_location=self.device)
+        if expert_data is None and hasattr(self.env, "get_amp_expert_observations"):
+            expert_data = self.env.get_amp_expert_observations()
+
+        expert_sampler = None
+        if hasattr(self.env, "sample_amp_expert_observations"):
+            expert_sampler = self.env.sample_amp_expert_observations
+
+        if isinstance(self.alg, AMPPPO):
+            if expert_data is not None:
+                self.alg.set_amp_expert_data(expert_data)
+            if expert_sampler is not None:
+                self.alg.set_amp_expert_sampler(expert_sampler)
+            return
+
+        amp_plugin = self._find_amp_plugin()
+        if amp_plugin is None:
+            return
+
+        if expert_data is not None:
+            amp_plugin.provider.set_expert_data(expert_data)
+        if expert_sampler is not None:
+            amp_plugin.provider.set_expert_sampler(expert_sampler)
+
+    def _find_amp_plugin(self) -> AMPPlugin | None:
+        """Return the configured AMP plugin, if any."""
+        for plugin in getattr(self.alg, "plugins", ()):
+            if isinstance(plugin, AMPPlugin):
+                return plugin
+        return None
 
     def _configure_multi_gpu(self) -> None:
         """Configure multi-gpu training."""

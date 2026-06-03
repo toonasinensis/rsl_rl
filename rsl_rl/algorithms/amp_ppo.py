@@ -11,12 +11,12 @@ import torch.nn as nn
 from collections.abc import Callable
 from itertools import chain
 from tensordict import TensorDict
-from torch.nn.functional import binary_cross_entropy_with_logits
 
 from rsl_rl.algorithms.ppo import PPO
+from rsl_rl.algorithms.plugins import AMPPlugin, ExternalAMPProvider
 from rsl_rl.env import VecEnv
 from rsl_rl.models import BaseModel, StochasticWrapper
-from rsl_rl.modules import MLP, EmpiricalNormalization, HiddenState
+from rsl_rl.modules import MLP, EmpiricalNormalization
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import (
     clone_state_dict_tensors,
@@ -77,7 +77,7 @@ class AMPDiscriminator(nn.Module):
 
 
 class AMPPPO(PPO):
-    """PPO with an adversarial motion prior discriminator."""
+    """Compatibility AMP PPO wrapper that reuses the shared AMP plugin core."""
 
     amp_discriminator: AMPDiscriminator
     """Discriminator that separates policy AMP observations from expert AMP observations."""
@@ -106,6 +106,7 @@ class AMPPPO(PPO):
         amp_cfg: dict | None = None,
         rnd_cfg: dict | None = None,
         symmetry_cfg: dict | None = None,
+        plugins=None,
         multi_gpu_cfg: dict | None = None,
     ) -> None:
         """Initialize PPO components and the AMP discriminator."""
@@ -130,6 +131,7 @@ class AMPPPO(PPO):
             device=device,
             rnd_cfg=rnd_cfg,
             symmetry_cfg=symmetry_cfg,
+            plugins=plugins,
             multi_gpu_cfg=multi_gpu_cfg,
         )
 
@@ -138,9 +140,18 @@ class AMPPPO(PPO):
         self.amp_reward_scale = float(amp_cfg.get("reward_scale", 1.0))
         self.amp_loss_coef = float(amp_cfg.get("loss_coef", 1.0))
         self.amp_gradient_penalty_coef = float(amp_cfg.get("gradient_penalty_coef", 10.0))
-        self.amp_expert_data: TensorDict | None = None
-        self.amp_expert_sampler: Callable[[int], TensorDict | dict[str, torch.Tensor] | torch.Tensor] | None = None
         self.amp_rewards = torch.zeros(storage.num_envs, device=self.device)
+        self._amp_plugin_core = AMPPlugin(
+            reward_scale=self.amp_reward_scale,
+            loss_coef=self.amp_loss_coef,
+            gradient_penalty_coef=self.amp_gradient_penalty_coef,
+            provider=ExternalAMPProvider(),
+            discriminator=self.amp_discriminator,
+        )
+        self._amp_plugin_core._embedded_loss_handled_externally = True
+        self._amp_plugin_core.to(self.device)
+        self._amp_plugin_core.provider.setup(env=None, device=self.device, obs=None)
+        self._amp_plugin_core_metrics_enabled = False
 
         if amp_cfg.get("expert_data") is not None:
             self.set_amp_expert_data(amp_cfg["expert_data"])
@@ -152,25 +163,13 @@ class AMPPPO(PPO):
 
     def set_amp_expert_data(self, expert_data: TensorDict | dict[str, torch.Tensor] | torch.Tensor) -> None:
         """Set a fixed pool of expert AMP observations."""
-        self.amp_expert_data = self._as_amp_tensordict(expert_data)
+        self._amp_plugin_core.provider.set_expert_data(expert_data)
 
     def set_amp_expert_sampler(
         self, sampler: Callable[[int], TensorDict | dict[str, torch.Tensor] | torch.Tensor]
     ) -> None:
         """Set a sampler that returns expert AMP observations for a requested batch size."""
-        self.amp_expert_sampler = sampler
-
-    def act(self, obs: TensorDict) -> torch.Tensor:
-        """Sample actions and store transition data."""
-        self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
-        self.transition.actions = self._extract_actions(self.actor(obs, stochastic_output=True)).detach()
-        self.transition.values = self._critic_value(obs).detach()
-        self.transition.actions_log_prob = self.actor.get_output_log_prob(  # type: ignore
-            self.transition.actions
-        ).detach()
-        self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
-        self.transition.observations = obs
-        return self.transition.actions  # type: ignore
+        self._amp_plugin_core.provider.set_expert_sampler(sampler)
 
     def process_env_step(
         self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
@@ -181,56 +180,8 @@ class AMPPPO(PPO):
         super().process_env_step(obs, rewards + self.amp_rewards, dones, extras)
 
     def compute_amp_rewards(self, obs: TensorDict) -> torch.Tensor:
-        """Compute the discriminator reward for AMP observations."""
-        with torch.no_grad():
-            logits = self.amp_discriminator(obs)
-            expert_prob = torch.sigmoid(logits)
-            rewards = -torch.log(torch.clamp(1.0 - expert_prob, min=1.0e-4))
-        return self.amp_reward_scale * rewards.squeeze(-1)
-
-    def compute_returns(self, obs: TensorDict) -> None:
-        """Compute return and advantage targets from stored transitions."""
-        st = self.storage
-        last_values = self._critic_value(obs).detach()
-        advantage = 0
-        for step in reversed(range(st.num_transitions_per_env)):
-            next_values = last_values if step == st.num_transitions_per_env - 1 else st.values[step + 1]
-            next_is_not_terminal = 1.0 - st.dones[step].float()  # type: ignore
-            delta = st.rewards[step] + next_is_not_terminal * self.gamma * next_values - st.values[step]
-            advantage = delta + next_is_not_terminal * self.gamma * self.lam * advantage
-            st.returns[step] = advantage + st.values[step]
-        st.advantages = st.returns - st.values
-        if not self.normalize_advantage_per_mini_batch:
-            st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
-
-    def _forward_model(
-        self, batch: TensorDict | RolloutStorage.Batch, original_batch_size: int
-    ) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...] | dict]:
-        """Run actor/critic forward pass for one mini-batch."""
-        forward_dict = self.actor(
-            batch.observations,
-            masks=batch.masks,
-            hidden_state=batch.hidden_states[0],
-            stochastic_output=True,
-            train_mode=True,
-        )
-        actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
-        values = self._critic_value(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
-        distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
-        entropy = self.actor.output_entropy[:original_batch_size]  # type: ignore
-
-        extra = forward_dict.get("extra", {}) if isinstance(forward_dict, dict) else {}
-        aux_losses: dict = extra.get("aux_losses") or {}
-        if not aux_losses and extra.get("aux_loss") is not None:
-            aux_losses = {"aux_loss": extra["aux_loss"]}
-
-        return {
-            "actions_log_prob": actions_log_prob,
-            "values": values,
-            "distribution_params": distribution_params,
-            "entropy": entropy,
-            "aux_losses": aux_losses,
-        }
+        """Compute the discriminator reward through the shared AMP plugin core."""
+        return self._amp_plugin_core.compute_reward_from_observations(obs)
 
     def _compute_loss(self, mb_forward_results: dict, mb_rollout_data: dict) -> dict:
         """Compute PPO and AMP discriminator losses."""
@@ -242,42 +193,26 @@ class AMPPPO(PPO):
 
     def _compute_amp_loss(self, policy_obs: TensorDict) -> dict[str, torch.Tensor]:
         """Compute binary discriminator loss on policy and expert AMP observations."""
-        policy_inputs = self.amp_discriminator.extract_input(policy_obs).detach()
-        policy_inputs = policy_inputs.reshape(-1, policy_inputs.shape[-1])
-        expert_obs = self._sample_amp_expert_observations(policy_inputs.shape[0])
-        expert_inputs = self.amp_discriminator.extract_input(expert_obs).detach()
-        expert_inputs = expert_inputs.reshape(-1, expert_inputs.shape[-1])
+        amp_loss_dict = self._amp_plugin_core.compute_loss_from_policy_obs(
+            policy_obs,
+            use_policy_replay=False,
+            detach_metrics=False,
+        )
+        if self._amp_plugin_core_metrics_enabled and amp_loss_dict:
+            self._amp_plugin_core.record_loss_metrics(amp_loss_dict)
+        return amp_loss_dict
 
-        policy_logits = self.amp_discriminator(policy_inputs)
-        expert_logits = self.amp_discriminator(expert_inputs)
-        policy_loss = binary_cross_entropy_with_logits(policy_logits, torch.zeros_like(policy_logits))
-        expert_loss = binary_cross_entropy_with_logits(expert_logits, torch.ones_like(expert_logits))
-        gradient_penalty = policy_loss.new_tensor(0.0)
-
-        if self.amp_gradient_penalty_coef > 0.0:
-            expert_inputs.requires_grad_(True)
-            expert_logits_for_gp = self.amp_discriminator(expert_inputs)
-            gradients = torch.autograd.grad(
-                expert_logits_for_gp.sum(),
-                expert_inputs,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-            gradient_penalty = gradients.pow(2).sum(dim=-1).mean()
-
-        amp_loss = 0.5 * (policy_loss + expert_loss) + self.amp_gradient_penalty_coef * gradient_penalty
-        policy_acc = (policy_logits.detach() < 0.0).float().mean()
-        expert_acc = (expert_logits.detach() > 0.0).float().mean()
-
-        return {
-            "amp_loss": amp_loss,
-            "policy_loss": policy_loss,
-            "expert_loss": expert_loss,
-            "gradient_penalty": gradient_penalty,
-            "policy_accuracy": policy_acc,
-            "expert_accuracy": expert_acc,
-        }
+    def update(self) -> dict[str, float]:
+        """Run PPO update while reusing the shared AMPPlugin lifecycle for AMP internals."""
+        self._amp_plugin_core_metrics_enabled = True
+        self.plugins.append(self._amp_plugin_core)
+        try:
+            return super().update()
+        finally:
+            plugin = self.plugins.pop()
+            if plugin is not self._amp_plugin_core:
+                raise RuntimeError("AMPPPO internal AMP plugin lifecycle stack became inconsistent.")
+            self._amp_plugin_core_metrics_enabled = False
 
     def _as_amp_tensordict(self, data: TensorDict | dict[str, torch.Tensor] | torch.Tensor) -> TensorDict:
         """Move expert AMP data to the training device and flatten leading batch dims."""
@@ -298,44 +233,60 @@ class AMPPPO(PPO):
             data = data.flatten(0, len(data.batch_size) - 1)
         return data
 
-    def _sample_amp_expert_observations(self, batch_size: int) -> TensorDict:
-        """Sample expert AMP observations from the sampler or fixed expert pool."""
-        if self.amp_expert_sampler is not None:
-            return self._as_amp_tensordict(self.amp_expert_sampler(batch_size))
+    @property
+    def amp_expert_data(self) -> TensorDict | None:
+        """Compatibility view of expert AMP data backed by the internal provider."""
+        provider = getattr(getattr(self, "_amp_plugin_core", None), "provider", None)
+        expert_data = getattr(provider, "expert_data", None)
+        if expert_data is None:
+            return None
+        return self._as_amp_tensordict(expert_data)
 
-        assert self.amp_expert_data is not None
-        indices = torch.randint(self.amp_expert_data.batch_size[0], (batch_size,), device=self.device)
-        return self.amp_expert_data[indices]
+    @amp_expert_data.setter
+    def amp_expert_data(self, expert_data: TensorDict | dict[str, torch.Tensor] | torch.Tensor | None) -> None:
+        """Route legacy expert-data assignments through the internal provider."""
+        if expert_data is None:
+            provider = getattr(getattr(self, "_amp_plugin_core", None), "provider", None)
+            if provider is not None and hasattr(provider, "expert_data"):
+                provider.expert_data = None
+            return
+        self.set_amp_expert_data(expert_data)
 
-    @staticmethod
-    def _extract_actions(model_output: torch.Tensor | dict) -> torch.Tensor:
-        """Extract the primary tensor from tensor- or dict-returning models."""
-        if isinstance(model_output, dict):
-            return model_output["actions"]
-        return model_output
-
-    def _critic_value(
+    @property
+    def amp_expert_sampler(
         self,
-        obs: TensorDict,
-        masks: torch.Tensor | None = None,
-        hidden_state: HiddenState = None,
-    ) -> torch.Tensor:
-        """Normalize dict-returning critic outputs to a value tensor."""
-        return self._extract_actions(self.critic(obs, masks=masks, hidden_state=hidden_state))
+    ) -> Callable[[int], TensorDict | dict[str, torch.Tensor] | torch.Tensor] | None:
+        """Compatibility view of the expert AMP sampler backed by the internal provider."""
+        provider = getattr(getattr(self, "_amp_plugin_core", None), "provider", None)
+        return getattr(provider, "expert_sampler", None)
+
+    @amp_expert_sampler.setter
+    def amp_expert_sampler(
+        self,
+        sampler: Callable[[int], TensorDict | dict[str, torch.Tensor] | torch.Tensor] | None,
+    ) -> None:
+        """Route legacy sampler assignments through the internal provider."""
+        if sampler is None:
+            provider = getattr(getattr(self, "_amp_plugin_core", None), "provider", None)
+            if provider is not None and hasattr(provider, "expert_sampler"):
+                provider.expert_sampler = None
+            return
+        self.set_amp_expert_sampler(sampler)
 
     def train_mode(self) -> None:
         """Set train mode for learnable models."""
         super().train_mode()
-        self.amp_discriminator.train()
+        self._amp_plugin_core.on_train_mode(self)
 
     def eval_mode(self) -> None:
         """Set evaluation mode for learnable models."""
         super().eval_mode()
-        self.amp_discriminator.eval()
+        self._amp_plugin_core.on_eval_mode(self)
 
     def save(self) -> dict:
         """Return a dict of all models for saving."""
         saved_dict = super().save()
+        self._amp_plugin_core.on_save(self, saved_dict)
         saved_dict["amp_discriminator_state_dict"] = clone_state_dict_tensors(self.amp_discriminator.state_dict())
         return saved_dict
 
@@ -343,6 +294,7 @@ class AMPPPO(PPO):
         """Load specified models from a saved dict."""
         load_amp = load_cfg is None or load_cfg.get("amp", True)
         load_iteration = super().load(loaded_dict, load_cfg, strict)
+        self._amp_plugin_core.on_load(self, loaded_dict)
         if load_amp:
             self.amp_discriminator.load_state_dict(
                 clone_state_dict_tensors(loaded_dict["amp_discriminator_state_dict"]),
@@ -366,7 +318,10 @@ class AMPPPO(PPO):
         )  # type: ignore
 
         cfg["algorithm"].pop("symmetry_cfg", None)
-        cfg["algorithm"].pop("aux_modules", None)
+        plugin_cfgs = PPO._resolve_plugin_cfgs(cfg["algorithm"], include_amp_cfg=False)
+        if any(PPO._is_amp_plugin_cfg(plugin_cfg) for plugin_cfg in plugin_cfgs):
+            raise ValueError("AMPPPO already owns an internal AMP core and cannot be combined with an explicit AMPPlugin.")
+        plugins = PPO._build_plugins(plugin_cfgs, obs)
 
         actor = construct_actor_with_shell(obs, cfg["obs_groups"], cfg["actor"], env.num_actions).to(device)
         print(f"Actor Model: {actor}")
@@ -387,9 +342,11 @@ class AMPPPO(PPO):
             amp_discriminator,
             device=device,
             amp_cfg=amp_cfg,
+            plugins=plugins,
             **cfg["algorithm"],
-            multi_gpu_cfg=cfg["multi_gpu"],
+            multi_gpu_cfg=cfg.get("multi_gpu"),
         )
+        PPO._initialize_plugins(alg, env)
         return alg
 
     def broadcast_parameters(self) -> None:

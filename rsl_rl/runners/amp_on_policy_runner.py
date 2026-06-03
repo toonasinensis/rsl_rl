@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import torch
-
 from rsl_rl.algorithms import AMPPPO
 from rsl_rl.env import VecEnv
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
@@ -18,17 +16,5 @@ class AMPOnPolicyRunner(OnPolicyRunner):
     alg: AMPPPO
 
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
-        """Construct the runner and attach AMP expert data providers."""
-        amp_runner_cfg = train_cfg.get("amp_runner", {})
+        """Construct the runner and reuse the shared AMP expert-data injection path."""
         super().__init__(env, train_cfg, log_dir=log_dir, device=device)
-
-        expert_data = amp_runner_cfg.get("expert_data")
-        if expert_data is None and amp_runner_cfg.get("expert_data_path") is not None:
-            expert_data = torch.load(amp_runner_cfg["expert_data_path"], weights_only=False, map_location=device)
-        if expert_data is None and hasattr(env, "get_amp_expert_observations"):
-            expert_data = env.get_amp_expert_observations()
-        if expert_data is not None:
-            self.alg.set_amp_expert_data(expert_data)
-
-        if hasattr(env, "sample_amp_expert_observations"):
-            self.alg.set_amp_expert_sampler(env.sample_amp_expert_observations)
