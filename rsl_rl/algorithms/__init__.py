@@ -7,6 +7,6 @@
 
 from .distillation import Distillation
 from .ppo import PPO
-from .plugins import AMPPlugin, PPOPlugin
+from .plugins import AMPPlugin, PPOPlugin, TeacherKLPlugin
 
-__all__ = ["PPO", "Distillation", "AMPPlugin", "PPOPlugin"]
+__all__ = ["PPO", "Distillation", "AMPPlugin", "PPOPlugin", "TeacherKLPlugin"]
