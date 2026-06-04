@@ -67,6 +67,78 @@ def _subtract_frame_transforms(
     return rel_pos_parent, _quat_normalize(rel_quat_parent)
 #endregion math utils
 
+_BODY_NAME_KEYS = ("body_names", "motion_body_names", "robot_body_names")
+
+
+def _decode_name(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _read_name_list(raw: np.lib.npyio.NpzFile, keys: Sequence[str]) -> list[str] | None:
+    for key in keys:
+        if key not in raw.files:
+            continue
+        arr = np.asarray(raw[key])
+        if arr.shape == ():
+            value = arr.item()
+            if isinstance(value, (list, tuple, np.ndarray)):
+                arr = np.asarray(value)
+            else:
+                return [_decode_name(value)]
+        return [_decode_name(value) for value in arr.reshape(-1).tolist()]
+    return None
+
+
+def _name_indexes(source_names: Sequence[str], target_names: Sequence[str], path: str) -> list[int]:
+    source_to_index = {name: index for index, name in enumerate(source_names)}
+    missing = [name for name in target_names if name not in source_to_index]
+    if missing:
+        raise ValueError(
+            f"{path}: npz body_names is missing required AMP body names {missing}. "
+            f"Available body_names: {list(source_names)}"
+        )
+    return [source_to_index[name] for name in target_names]
+
+
+def _resolve_amp_body_indexes(
+    *,
+    raw: np.lib.npyio.NpzFile,
+    motion_path: str,
+    motion_body_count: int,
+    body_names: Sequence[str],
+    anchor_name: str,
+    all_body_names: Sequence[str],
+) -> tuple[list[int], int, str]:
+    npz_body_names = _read_name_list(raw, _BODY_NAME_KEYS)
+    target_body_names = list(body_names)
+    if anchor_name not in target_body_names:
+        raise ValueError(f"AMP anchor_name '{anchor_name}' must be included in amp body_names: {target_body_names}")
+
+    if npz_body_names is not None:
+        if len(npz_body_names) != motion_body_count:
+            raise ValueError(
+                f"{motion_path}: body_names length {len(npz_body_names)} does not match "
+                f"body array dim {motion_body_count}."
+            )
+        body_indexes = _name_indexes(npz_body_names, target_body_names, motion_path)
+        anchor_index = _name_indexes(npz_body_names, [anchor_name], motion_path)[0]
+        return body_indexes, anchor_index, "metadata"
+
+    if motion_body_count == len(target_body_names):
+        return list(range(len(target_body_names))), target_body_names.index(anchor_name), "legacy_selected"
+
+    if motion_body_count == len(all_body_names):
+        body_indexes = _name_indexes(all_body_names, target_body_names, motion_path)
+        anchor_index = _name_indexes(all_body_names, [anchor_name], motion_path)[0]
+        return body_indexes, anchor_index, "legacy_full_body"
+
+    raise ValueError(
+        f"{motion_path}: cannot map npz body dim {motion_body_count} to AMP body dim {len(target_body_names)}. "
+        "Add body_names metadata with scripts/attach_npz_names.py or regenerate the npz."
+    )
+
 
 class AMPLoader:
     def __init__(self, motion_file: str,
@@ -87,11 +159,13 @@ class AMPLoader:
         """
         assert os.path.exists(motion_file), f"Invalid path: {motion_file}"
 
-        # resolve name -> index
         all_names_list = list(all_body_names)
-        self._body_indexes = [all_names_list.index(n) for n in body_names]
-        self._anchor_indexes = all_names_list.index(anchor_name)
-        self._num_bodies = len(self._body_indexes)
+        body_names_list = list(body_names)
+        self._body_names = body_names_list
+        self._anchor_name = anchor_name
+        self._body_indexes = list(range(len(body_names_list)))
+        self._anchor_indexes = body_names_list.index(anchor_name)
+        self._num_bodies = len(body_names_list)
 
         # 检查是文件还是文件夹
         if os.path.isfile(motion_file):
@@ -124,7 +198,7 @@ class AMPLoader:
         # 处理每个motion文件
         for motion_idx, (motion_name, motion_path) in enumerate(zip(motion_names, motion_files)):
             print(f"Processing motion {motion_idx+1}/{len(motion_files)}: {motion_name}")
-            data = np.load(motion_path)
+            data = np.load(motion_path, allow_pickle=True)
             
             if motion_idx == 0:
                 self.fps = data["fps"]
@@ -135,19 +209,27 @@ class AMPLoader:
             _body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
             _body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
             _body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
+            body_indexes, anchor_index, body_order_source = _resolve_amp_body_indexes(
+                raw=data,
+                motion_path=motion_path,
+                motion_body_count=int(_body_pos_w.shape[1]),
+                body_names=body_names_list,
+                anchor_name=anchor_name,
+                all_body_names=all_names_list,
+            )
 
             # >>> AMP BODY ID DEBUG START
             if motion_idx == 0:
                 print("\n========== AMP BODY ID DEBUG: NPZ ==========")
                 print("[AMPDBG] motion_path:", motion_path)
                 print("[AMPDBG] npz body count:", _body_pos_w.shape[1])
+                print("[AMPDBG] npz body order source:", body_order_source)
+                print("[AMPDBG] npz has body_names:", _read_name_list(data, _BODY_NAME_KEYS) is not None)
                 print("[AMPDBG] runtime all_body_names count:", len(all_names_list))
-                print("[AMPDBG] selected body indexes:", self._body_indexes)
-                print("[AMPDBG] selected body names:", [all_names_list[i] for i in self._body_indexes])
-                print("[AMPDBG] anchor index:", self._anchor_indexes)
-                print("[AMPDBG] anchor name:", all_names_list[self._anchor_indexes])
-                if _body_pos_w.shape[1] != len(all_names_list):
-                    print("[AMPDBG][WARN] npz body count != runtime body_names count")
+                print("[AMPDBG] amp body indexes in npz:", body_indexes)
+                print("[AMPDBG] amp body names:", body_names_list)
+                print("[AMPDBG] amp anchor index in npz:", anchor_index)
+                print("[AMPDBG] amp anchor name:", anchor_name)
                 print("============================================\n")
             # <<< AMP BODY ID DEBUG END
             
@@ -163,12 +245,16 @@ class AMPLoader:
             # 处理所有帧
             for frame_idx in tqdm(range(time_step_total), desc=f"Preloading AMP data for {motion_name}"):
                 # 获取当前帧的anchor和body数据
-                tgt_anchor_pos_w = _body_pos_w[frame_idx, self._anchor_indexes, :].squeeze().unsqueeze(0).repeat(self._num_bodies, 1)
-                tgt_anchor_quat_w = _body_quat_w[frame_idx, self._anchor_indexes, :].squeeze().unsqueeze(0).repeat(self._num_bodies, 1)
-                tgt_body_pos_w = _body_pos_w[frame_idx, self._body_indexes, :]
-                tgt_body_quat_w = _body_quat_w[frame_idx, self._body_indexes, :]
-                tgt_body_lin_vel_w = _body_lin_vel_w[frame_idx, self._body_indexes, :]
-                tgt_body_ang_vel_w = _body_ang_vel_w[frame_idx, self._body_indexes, :]
+                tgt_anchor_pos_w = (
+                    _body_pos_w[frame_idx, anchor_index, :].squeeze().unsqueeze(0).repeat(self._num_bodies, 1)
+                )
+                tgt_anchor_quat_w = (
+                    _body_quat_w[frame_idx, anchor_index, :].squeeze().unsqueeze(0).repeat(self._num_bodies, 1)
+                )
+                tgt_body_pos_w = _body_pos_w[frame_idx, body_indexes, :]
+                tgt_body_quat_w = _body_quat_w[frame_idx, body_indexes, :]
+                tgt_body_lin_vel_w = _body_lin_vel_w[frame_idx, body_indexes, :]
+                tgt_body_ang_vel_w = _body_ang_vel_w[frame_idx, body_indexes, :]
 
                 # 计算body相对于anchor的位置和姿态 (局部坐标系)
                 tgt_robot_body_pos_b, tgt_robot_body_quat_b = (
