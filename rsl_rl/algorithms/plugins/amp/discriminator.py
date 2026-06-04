@@ -111,9 +111,9 @@ class Discriminator(nn.Module):
         grad_pen = lambda_ * (grad.norm(2, dim=1) - 0).pow(2).mean()
         return grad_pen
 
-    def predict_amp_reward(self, state, next_state, task_reward, normalizer=None):
+    def predict_amp_reward_components(self, state, next_state, task_reward, normalizer=None):
         """
-        Predict the AMP reward given current and next states, optionally interpolated with a task reward.
+        Predict AMP reward components given current and next states.
 
         Args:
             state (torch.Tensor): Current state tensor.
@@ -123,7 +123,7 @@ class Discriminator(nn.Module):
 
         Returns:
             tuple:
-                - reward (torch.Tensor): Predicted AMP reward (optionally interpolated) with shape (batch_size,).
+                - reward_components (dict[str, torch.Tensor]): task, pure AMP, and mixed rewards.
                 - d (torch.Tensor): Raw discriminator output logits with shape (batch_size, 1).
         """
         with torch.no_grad():
@@ -133,15 +133,31 @@ class Discriminator(nn.Module):
                 next_state = normalizer.normalize_torch(next_state, self.device)
 
             d = self.amp_linear(self.trunk(torch.cat([state, next_state], dim=-1)))
-            reward = self.amp_reward_coef * torch.clamp(
+            task_reward = task_reward.reshape(-1, 1)
+            amp_reward = self.amp_reward_coef * torch.clamp(
                 1 - (1 / 4) * torch.square(d - 1), min=0
             )
-            if self.task_reward_lerp > 0:
-                reward = self._lerp_reward(reward, task_reward.unsqueeze(-1))
+            mixed_reward = self._lerp_reward(amp_reward, task_reward)
             self.train()
 
-            reward = reward.squeeze(-1)
-        return reward, d
+            reward_components = {
+                "task_reward": task_reward.squeeze(-1),
+                "amp_reward": amp_reward.squeeze(-1),
+                "mixed_reward": mixed_reward.squeeze(-1),
+            }
+        return reward_components, d
+
+    def predict_amp_reward(self, state, next_state, task_reward, normalizer=None):
+        """
+        Predict the mixed AMP reward given current and next states.
+
+        This keeps the legacy return shape while the plugin can use
+        :meth:`predict_amp_reward_components` for logging.
+        """
+        reward_components, d = self.predict_amp_reward_components(
+            state, next_state, task_reward, normalizer=normalizer
+        )
+        return reward_components["mixed_reward"], d
 
     def compute_loss(self, policy_d, expert_d, sample_amp_expert, _sample_amp_policy=None, lambda_=10):
         """计算判别器损失（MSE）和梯度惩罚项。

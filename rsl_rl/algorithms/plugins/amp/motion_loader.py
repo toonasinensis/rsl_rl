@@ -135,6 +135,21 @@ class AMPLoader:
             _body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
             _body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
             _body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
+
+            # >>> AMP BODY ID DEBUG START
+            if motion_idx == 0:
+                print("\n========== AMP BODY ID DEBUG: NPZ ==========")
+                print("[AMPDBG] motion_path:", motion_path)
+                print("[AMPDBG] npz body count:", _body_pos_w.shape[1])
+                print("[AMPDBG] runtime all_body_names count:", len(all_names_list))
+                print("[AMPDBG] selected body indexes:", self._body_indexes)
+                print("[AMPDBG] selected body names:", [all_names_list[i] for i in self._body_indexes])
+                print("[AMPDBG] anchor index:", self._anchor_indexes)
+                print("[AMPDBG] anchor name:", all_names_list[self._anchor_indexes])
+                if _body_pos_w.shape[1] != len(all_names_list):
+                    print("[AMPDBG][WARN] npz body count != runtime body_names count")
+                print("============================================\n")
+            # <<< AMP BODY ID DEBUG END
             
             time_step_total = _dof_pos.shape[0]
             

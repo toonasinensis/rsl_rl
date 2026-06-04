@@ -79,6 +79,28 @@ class AMPPlugin(PPOPlugin):
         robot = env.unwrapped.scene["robot"]
         all_body_names = list(robot.body_names)
 
+        # >>> AMP BODY ID DEBUG START
+        print("\n========== AMP BODY ID DEBUG: RUNTIME ==========")
+        print("[AMPDBG] runtime num bodies:", len(all_body_names))
+        for body_id, body_name in enumerate(all_body_names):
+            print(f"[AMPDBG] runtime body[{body_id:02d}] = {body_name}")
+        resolved_body_ids, resolved_body_names = robot.find_bodies(
+            list(self.amp_body_names),
+            preserve_order=True,
+        )
+        resolved_anchor_ids, resolved_anchor_names = robot.find_bodies(
+            [self.amp_anchor_name],
+            preserve_order=True,
+        )
+        print("[AMPDBG] configured amp_anchor_name:", self.amp_anchor_name)
+        print("[AMPDBG] resolved anchor ids:", resolved_anchor_ids)
+        print("[AMPDBG] resolved anchor names:", resolved_anchor_names)
+        print("[AMPDBG] configured amp_body_names:", self.amp_body_names)
+        print("[AMPDBG] resolved body ids:", resolved_body_ids)
+        print("[AMPDBG] resolved body names:", resolved_body_names)
+        print("================================================\n")
+        # <<< AMP BODY ID DEBUG END
+
         self.amp_data = AMPLoader(
             motion_file=self.amp_motion_files,
             body_names=self.amp_body_names,
@@ -86,6 +108,15 @@ class AMPPlugin(PPOPlugin):
             all_body_names=all_body_names,
             device=ppo.device,
         )
+        # >>> AMP BODY ID DEBUG START
+        print("\n========== AMP BODY ID DEBUG: LOADER ==========")
+        print("[AMPDBG] loader anchor index:", self.amp_data._anchor_indexes)
+        print("[AMPDBG] loader anchor name:", all_body_names[self.amp_data._anchor_indexes])
+        print("[AMPDBG] loader body indexes:", self.amp_data._body_indexes)
+        print("[AMPDBG] loader body names:", [all_body_names[i] for i in self.amp_data._body_indexes])
+        print("[AMPDBG] loader observation_dim:", self.amp_data.observation_dim)
+        print("===============================================\n")
+        # <<< AMP BODY ID DEBUG END
         obs_dim: int = self.amp_data.observation_dim
 
         self.discriminator = self._build_discriminator(obs_dim, ppo.device)
@@ -120,7 +151,7 @@ class AMPPlugin(PPOPlugin):
         if amp_obs is not None:
             self._current_amp_obs = amp_obs.detach().clone()
 
-    def on_after_step(self, _runner, obs, rewards, dones, _extras) -> torch.Tensor:
+    def on_after_step(self, _runner, obs, rewards, dones, extras) -> torch.Tensor:
         if self._current_amp_obs is None or self.discriminator is None:
             return rewards
         next_amp_obs = obs.get("amp", obs.get("amp_obs"))
@@ -135,20 +166,22 @@ class AMPPlugin(PPOPlugin):
                 next_amp_obs_with_term[reset_ids] = self._current_amp_obs[reset_ids]
 
         self.amp_storage.insert(self._current_amp_obs, next_amp_obs_with_term)
-        rewards = self._compute_amp_reward(self._current_amp_obs, next_amp_obs_with_term, rewards)
-        return rewards
+        reward_components = self._compute_amp_reward(self._current_amp_obs, next_amp_obs_with_term, rewards)
+        step_metrics = extras.setdefault("step_metrics", {})
+        step_metrics.update({k: v.reshape(-1, 1) for k, v in reward_components.items()})
+        return reward_components["mixed_reward"]
 
     def _compute_amp_reward(
         self,
         amp_obs: torch.Tensor,
         next_amp_obs: torch.Tensor,
         task_rewards: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         """计算判别器奖励，子类可覆盖以实现自定义混合策略。"""
-        shaped, _ = self.discriminator.predict_amp_reward(
+        reward_components, _ = self.discriminator.predict_amp_reward_components(
             amp_obs, next_amp_obs, task_rewards, normalizer=self.amp_normalizer
         )
-        return shaped
+        return reward_components
 
     # ------------------------------------------------------------------
     # Update hooks
