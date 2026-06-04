@@ -110,10 +110,10 @@ class AMPPlugin(PPOPlugin):
         )
         # >>> AMP BODY ID DEBUG START
         print("\n========== AMP BODY ID DEBUG: LOADER ==========")
-        print("[AMPDBG] loader anchor index:", self.amp_data._anchor_indexes)
-        print("[AMPDBG] loader anchor name:", all_body_names[self.amp_data._anchor_indexes])
-        print("[AMPDBG] loader body indexes:", self.amp_data._body_indexes)
-        print("[AMPDBG] loader body names:", [all_body_names[i] for i in self.amp_data._body_indexes])
+        print("[AMPDBG] loader anchor index in AMP selected order:", self.amp_data._anchor_indexes)
+        print("[AMPDBG] loader anchor name:", self.amp_data._anchor_name)
+        print("[AMPDBG] loader body indexes in AMP selected order:", self.amp_data._body_indexes)
+        print("[AMPDBG] loader body names:", self.amp_data._body_names)
         print("[AMPDBG] loader observation_dim:", self.amp_data.observation_dim)
         print("===============================================\n")
         # <<< AMP BODY ID DEBUG END
