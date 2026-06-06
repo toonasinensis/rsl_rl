@@ -242,6 +242,7 @@ class AMPPlugin(PPOPlugin):
         }
 
     def on_post_backward(self, ppo) -> None:
+        # TODO 确认 disc grad clip 和 policy std clip 是否合适
         nn.utils.clip_grad_norm_(self.discriminator.parameters(), ppo.max_grad_norm)
         if self.min_std is not None:
             self._clamp_policy_std(ppo)

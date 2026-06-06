@@ -23,3 +23,4 @@ class DistillationRunner(OnPolicyRunner):
             raise ValueError("Teacher model parameters not loaded. Please load a teacher model to distill.")
 
         super().learn(num_learning_iterations, init_at_random_ep_len)
+        raise NotImplementedError("Teacher studet distillation mechanism is not implemented.")

@@ -6,7 +6,7 @@ from tensordict import TensorDict
 from rsl_rl.modules import  HiddenState
 from rsl_rl.modules import MLP
 import torch.nn.functional as F
-try:
+try: # TODO
     from vector_quantize_pytorch import FSQ
 except ImportError:
     FSQ = None  # type: ignore[assignment,misc]
