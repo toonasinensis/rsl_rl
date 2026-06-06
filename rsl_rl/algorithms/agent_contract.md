@@ -290,7 +290,9 @@ runner 决定“什么时候训练”，algorithm 决定“训练时算什么、
 - `construct_algorithm()` 后调用 `plugin.on_init(alg, env)`
 - `update()` 前调用 `plugin.on_update_start(alg)`
 - 每个 mini-batch 后调用 `plugin.on_per_batch_extra_loss(alg, batch)`
-- backward / step 相关阶段调用 `plugin.on_post_backward(alg)`、`plugin.on_post_update(alg)`
+- 每个 mini-batch 的 backward 后、step 前调用 `plugin.on_per_batch_post_backward(alg)`
+- 每个 mini-batch 的 step 后调用 `plugin.on_per_batch_post_step(alg)`
+- `update()` 结束后调用 `plugin.on_post_update(alg)`
 - train/eval/save/load 时调用对应 hook
 
 边界约束：

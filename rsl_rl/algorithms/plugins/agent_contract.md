@@ -88,7 +88,8 @@ plugin 可以扩展 PPO，但不应接管 PPO。
 - `on_after_step(runner, obs, rewards, dones, extras) -> rewards`
 - `on_update_start(ppo)`
 - `on_per_batch_extra_loss(ppo, batch) -> dict[str, torch.Tensor]`
-- `on_post_backward(ppo)`
+- `on_per_batch_post_backward(ppo)`
+- `on_per_batch_post_step(ppo)`
 - `on_post_update(ppo) -> dict[str, float]`
 - `on_train_mode(ppo)`
 - `on_eval_mode(ppo)`
@@ -140,11 +141,16 @@ plugin 可以扩展 PPO，但不应接管 PPO。
    - `loss.backward()`
    - 若多 GPU，则 `reduce_parameters()`
    - 主模型梯度裁剪
-   - TODO 确认这里是否也应加入 hook 做 plugins 独有模块的梯度裁剪
+   - `plugin.on_per_batch_post_backward(ppo)`
    - `optimizer.step()`
-   - `plugin.on_post_backward(ppo)`
+   - `plugin.on_per_batch_post_step(ppo)`
 3. batch 全部结束后：
    - `plugin.on_post_update(ppo)`
+
+命名语义上：
+
+- `on_per_batch_post_backward()` 表示当前 mini-batch 的 backward 已完成，但参数尚未 step
+- `on_per_batch_post_step()` 表示当前 mini-batch 的参数已经更新完成
 
 ### 6.4 模式切换与 checkpoint 阶段
 
@@ -236,14 +242,32 @@ plugin 可以扩展 PPO，但不应接管 PPO。
 - 直接清空主优化器梯度
 - 修改 batch 结构的基础语义
 
-### 7.6 `on_post_backward(ppo)`
+### 7.6 `on_per_batch_post_backward(ppo)`
 
 允许：
 
-- 做 step 后的插件收尾逻辑
-- 在当前实现下处理不影响本次 step 的状态同步或约束逻辑
+- 做会影响本次参数更新的梯度级处理
+- 对插件私有参数做梯度裁剪
+- 在 step 前检查或修正某些梯度状态
 
-### 7.7 `on_post_update(ppo)`
+不应：
+
+- 做依赖“参数已更新”的投影逻辑
+- 假设 optimizer 已经完成 step
+
+### 7.7 `on_per_batch_post_step(ppo)`
+
+允许：
+
+- 做参数更新后的约束或投影
+- 修正需要落在合法域中的参数
+- 执行与本 batch 更新结果相关的收尾逻辑
+
+典型例子：
+
+- policy std 下界裁剪
+
+### 7.8 `on_post_update(ppo)`
 
 允许：
 
@@ -256,14 +280,14 @@ plugin 可以扩展 PPO，但不应接管 PPO。
 - 返回 `dict[str, float]`
 - 这些值会合并进最终 `loss_dict`
 
-### 7.8 `on_train_mode` / `on_eval_mode`
+### 7.9 `on_train_mode` / `on_eval_mode`
 
 允许：
 
 - 切换插件内部模块的 `train()/eval()`
 - 冻结或保持某些模块只在 eval
 
-### 7.9 `on_save` / `on_load`
+### 7.10 `on_save` / `on_load`
 
 允许：
 
@@ -294,8 +318,10 @@ plugin 可以扩展 PPO，但不应接管 PPO。
   初始化 policy/expert generator
 - `on_per_batch_extra_loss()`
   计算判别器损失与梯度惩罚
-- `on_post_backward()`
-  做判别器梯度裁剪，并可约束 policy std
+- `on_per_batch_post_backward()`
+  做判别器梯度裁剪
+- `on_per_batch_post_step()`
+  对 policy std 做更新后下界约束
 - `on_post_update()`
   输出判别器预测统计
 - `on_save()` / `on_load()`

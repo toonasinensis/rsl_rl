@@ -30,8 +30,9 @@ class PPOPlugin:
                 _compute_loss(...)
                 plugin.on_per_batch_extra_loss(ppo, batch) ← 返回额外 loss dict
                 loss.backward()
+                plugin.on_per_batch_post_backward(ppo)     ← 本 batch backward 后、step 前处理
                 optimizer.step()
-                plugin.on_post_backward(ppo)  ← 裁剪插件参数梯度
+                plugin.on_per_batch_post_step(ppo)         ← 本 batch step 后参数约束
             plugin.on_post_update(ppo)        ← 返回额外 metric dict
 
         ppo.train_mode() / eval_mode():
@@ -83,10 +84,17 @@ class PPOPlugin:
         """
         return {}
 
-    def on_post_backward(self, ppo: "PPO") -> None:
-        """optimizer.step() 后调用。
+    def on_per_batch_post_backward(self, ppo: "PPO") -> None:
+        """每个 mini-batch 的 backward 后、optimizer.step() 前调用。
 
-        通常用于裁剪插件自有参数（如判别器）的梯度范数。
+        通常用于裁剪插件自有参数（如判别器）的梯度范数，
+        或执行其他需要影响本次参数更新的梯度级处理。
+        """
+
+    def on_per_batch_post_step(self, ppo: "PPO") -> None:
+        """每个 mini-batch 的 optimizer.step() 后调用。
+
+        通常用于对更新后的参数施加投影/约束，例如策略标准差下界裁剪。
         """
 
     def on_post_update(self, ppo: "PPO") -> dict[str, float]:
