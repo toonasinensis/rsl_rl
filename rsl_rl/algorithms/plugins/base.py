@@ -30,8 +30,8 @@ class PPOPlugin:
                 _compute_loss(...)
                 plugin.on_per_batch_extra_loss(ppo, batch) ← 返回额外 loss dict
                 loss.backward()
+                plugin.on_post_backward(ppo)  ← optimizer.step() 前裁剪插件参数梯度
                 optimizer.step()
-                plugin.on_post_backward(ppo)  ← 裁剪插件参数梯度
             plugin.on_post_update(ppo)        ← 返回额外 metric dict
 
         ppo.train_mode() / eval_mode():
@@ -84,7 +84,7 @@ class PPOPlugin:
         return {}
 
     def on_post_backward(self, ppo: "PPO") -> None:
-        """optimizer.step() 后调用。
+        """loss.backward() 后、optimizer.step() 前调用。
 
         通常用于裁剪插件自有参数（如判别器）的梯度范数。
         """

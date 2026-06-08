@@ -33,8 +33,7 @@ class AMPPlugin(PPOPlugin):
         amp_body_names: list[str] | None = None,
         amp_anchor_name: str = "pelvis",
         amp_loss_coef: float = 1.0,
-        min_normalized_std: list[float] | float | None = None,
-        **_,
+        **kwargs,
     ):
         """初始化参数，重型对象在 on_init 中按需创建。
 
@@ -48,6 +47,11 @@ class AMPPlugin(PPOPlugin):
             amp_anchor_name: 锚点身体名称（用于坐标对齐）。
             amp_loss_coef: 判别器损失相对 PPO 损失的权重系数。
         """
+        if "min_normalized_std" in kwargs:
+            raise ValueError(
+                "AMPPlugin no longer clamps policy std. Move 'min_normalized_std' to "
+                "the PPO algorithm config as 'min_policy_std'."
+            )
         self.amp_reward_coef = amp_reward_coef
         self.amp_discr_hidden_dims = amp_discr_hidden_dims
         self.amp_task_reward_lerp = amp_task_reward_lerp
@@ -56,7 +60,6 @@ class AMPPlugin(PPOPlugin):
         self.amp_body_names = amp_body_names
         self.amp_anchor_name = amp_anchor_name
         self.amp_loss_coef = amp_loss_coef
-        self.min_std = min_normalized_std
 
         # 重型对象在 on_init 中创建（此时 ppo 和 env 均已就绪）
         self.discriminator: Discriminator | None = None
@@ -243,33 +246,6 @@ class AMPPlugin(PPOPlugin):
 
     def on_post_backward(self, ppo) -> None:
         nn.utils.clip_grad_norm_(self.discriminator.parameters(), ppo.max_grad_norm)
-        if self.min_std is not None:
-            self._clamp_policy_std(ppo)
-
-    def _clamp_policy_std(self, ppo) -> None:
-        """Mirrors local amp_ppo.py min_std clamping to prevent policy std collapse."""
-        dist = getattr(ppo.actor, "distribution", None)
-        if dist is None:
-            return
-        with torch.no_grad():
-            min_std = torch.as_tensor(self.min_std, device=ppo.device, dtype=torch.float32)
-            if min_std.ndim == 0:
-                min_std = min_std.unsqueeze(0)
-            std_type = getattr(dist, "std_type", None)
-            if std_type == "scalar" and hasattr(dist, "std_param"):
-                target = dist.std_param
-                if min_std.numel() == 1:
-                    min_std = min_std.expand_as(target)
-                elif min_std.numel() != target.numel():
-                    min_std = torch.clamp_min(min_std.min(), 1e-6).expand_as(target)
-                target.clamp_(min=min_std)
-            elif std_type == "log" and hasattr(dist, "log_std_param"):
-                target = dist.log_std_param
-                if min_std.numel() == 1:
-                    min_std = min_std.expand_as(target)
-                elif min_std.numel() != target.numel():
-                    min_std = torch.clamp_min(min_std.min(), 1e-6).expand_as(target)
-                target.clamp_(min=torch.log(torch.clamp_min(min_std, 1e-6)))
 
     def on_post_update(self, _ppo) -> dict[str, float]:
         n = max(self._pred_count, 1)

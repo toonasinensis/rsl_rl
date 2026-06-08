@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from tensordict import TensorDict
 
 from rsl_rl.algorithms.ppo import PPO
-from rsl_rl.models import MLPModel
+from rsl_rl.models import ActorModel, MLPModel
 from rsl_rl.storage import RolloutStorage
 from tests.conftest import make_obs
 
@@ -21,7 +23,7 @@ OBS_DIM = 8
 NUM_ACTIONS = 4
 
 
-def _make_actor(obs: TensorDict, obs_groups: dict, num_actions: int = 4, **kwargs: object) -> MLPModel:
+def _make_actor(obs: TensorDict, obs_groups: dict, num_actions: int = 4, **kwargs: object) -> ActorModel:
     """Create an MLPModel actor with a Gaussian distribution."""
     defaults: dict[str, object] = {
         "hidden_dims": [32, 32],
@@ -29,7 +31,9 @@ def _make_actor(obs: TensorDict, obs_groups: dict, num_actions: int = 4, **kwarg
         "distribution_cfg": {"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     }
     defaults.update(kwargs)
-    return MLPModel(obs, obs_groups, "actor", num_actions, **defaults)
+    distribution_cfg = defaults.pop("distribution_cfg")
+    backbone = MLPModel(obs, obs_groups, "actor", num_actions, **defaults)
+    return ActorModel(backbone, num_actions, distribution_cfg)  # type: ignore[arg-type]
 
 
 def _make_critic(obs: TensorDict, obs_groups: dict, **kwargs: object) -> MLPModel:
@@ -182,7 +186,7 @@ class TestGAEComputation:
             t = RolloutStorage.Transition()
             t.observations = obs
             t.hidden_states = (None, None)
-            t.actions = ppo.actor(obs, stochastic_output=True).detach()
+            t.actions = ppo.actor(obs, stochastic_output=True)["actions"].detach()
             t.values = ppo.critic(obs).detach()
             t.actions_log_prob = ppo.actor.get_output_log_prob(t.actions).detach()
             t.distribution_params = tuple(p.detach() for p in ppo.actor.output_distribution_params)
@@ -318,3 +322,70 @@ class TestAdaptiveLearningRate:
             ppo.learning_rate = min(1e-2, ppo.learning_rate * 1.5)
 
         assert ppo.learning_rate == initial_lr
+
+
+class TestPolicyStdClamp:
+    """Tests for PPO-owned policy std clamping."""
+
+    def test_clamps_scalar_policy_std(self) -> None:
+        ppo, _obs = _build_ppo(min_policy_std=[0.05] * NUM_ACTIONS)
+        dist = ppo.actor.distribution
+
+        with torch.no_grad():
+            dist.std_param.fill_(0.01)
+
+        ppo._clamp_policy_std()
+
+        assert torch.all(dist.std_param >= torch.full_like(dist.std_param, 0.05))
+
+    def test_clamps_log_policy_std(self) -> None:
+        obs = make_obs(NUM_ENVS, OBS_DIM)
+        obs_groups = {"actor": ["policy"], "critic": ["policy"]}
+        actor = _make_actor(
+            obs,
+            obs_groups,
+            NUM_ACTIONS,
+            distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "log"},
+        )
+        critic = _make_critic(obs, obs_groups)
+        storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+        ppo = PPO(actor, critic, storage, min_policy_std=0.05, schedule="fixed")
+        dist = ppo.actor.distribution
+
+        with torch.no_grad():
+            dist.log_std_param.fill_(math.log(0.01))
+
+        ppo._clamp_policy_std()
+
+        assert torch.all(dist.log_std_param >= torch.full_like(dist.log_std_param, math.log(0.05)))
+
+    def test_update_clamps_policy_std_after_optimizer_step(self) -> None:
+        ppo, obs = _build_ppo(min_policy_std=0.05)
+        dist = ppo.actor.distribution
+
+        for _ in range(NUM_STEPS):
+            t = RolloutStorage.Transition()
+            t.observations = obs
+            t.hidden_states = (None, None)
+            t.actions = ppo.actor(obs, stochastic_output=True)["actions"].detach()
+            t.values = ppo.critic(obs).detach()
+            t.actions_log_prob = ppo.actor.get_output_log_prob(t.actions).detach()
+            t.distribution_params = tuple(p.detach() for p in ppo.actor.output_distribution_params)
+            t.rewards = torch.randn(NUM_ENVS)
+            t.dones = torch.zeros(NUM_ENVS)
+            ppo.storage.add_transition(t)
+        ppo.compute_returns(obs)
+
+        original_step = ppo.optimizer.step
+
+        def step_and_lower_std(*args, **kwargs):
+            result = original_step(*args, **kwargs)
+            with torch.no_grad():
+                dist.std_param.fill_(0.01)
+            return result
+
+        ppo.optimizer.step = step_and_lower_std
+
+        ppo.update()
+
+        assert torch.all(dist.std_param >= torch.full_like(dist.std_param, 0.05))

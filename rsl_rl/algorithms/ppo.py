@@ -49,6 +49,7 @@ class PPO:
         schedule: str = "adaptive",
         desired_kl: float = 0.01,
         normalize_advantage_per_mini_batch: bool = False,
+        min_policy_std: list[float] | float | None = None,
         device: str = "cpu",
         # RND parameters
         rnd_cfg: dict | None = None,
@@ -103,6 +104,7 @@ class PPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        self.min_policy_std = min_policy_std
 
         self.plugins: list = list(plugins) if plugins else []
         # on_init is NOT called here — construct_algorithm calls it after env is available
@@ -347,6 +349,41 @@ class PPO:
             "aux_losses": aux_loss_dict,
         }
 
+    def _expand_min_policy_std(self, target: torch.Tensor) -> torch.Tensor:
+        """Return the configured minimum std broadcast to a distribution parameter tensor."""
+        if self.min_policy_std is None:
+            raise RuntimeError("min_policy_std is not configured")
+
+        min_std = torch.as_tensor(self.min_policy_std, device=target.device, dtype=target.dtype)
+        if min_std.ndim == 0:
+            min_std = min_std.unsqueeze(0)
+        min_std = torch.clamp_min(min_std, 1e-6)
+
+        if min_std.numel() == 1:
+            return min_std.expand_as(target)
+        if min_std.numel() != target.numel():
+            return min_std.min().expand_as(target)
+        return min_std.reshape_as(target)
+
+    def _clamp_policy_std(self) -> None:
+        """Clamp the actor policy std after optimizer updates to avoid std collapse."""
+        if self.min_policy_std is None:
+            return
+
+        dist = getattr(self.actor, "distribution", None)
+        if dist is None:
+            return
+
+        with torch.no_grad():
+            std_type = getattr(dist, "std_type", None)
+            if std_type == "scalar" and hasattr(dist, "std_param"):
+                target = dist.std_param
+                target.clamp_(min=self._expand_min_policy_std(target))
+            elif std_type == "log" and hasattr(dist, "log_std_param"):
+                target = dist.log_std_param
+                min_std = self._expand_min_policy_std(target)
+                target.clamp_(min=torch.log(min_std))
+
     def update(self) -> dict[str, float]:
         """Run optimization epochs over stored batches and return mean losses."""
         metrics = self._register_loss_metrics()
@@ -395,12 +432,13 @@ class PPO:
             # Apply the gradients for PPO
             nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-            self.optimizer.step()
-
 
             # 让插件在 backward 后裁剪自有参数（如判别器）的梯度
             for plugin in self.plugins:
                 plugin.on_post_backward(self)
+
+            self.optimizer.step()
+            self._clamp_policy_std()
             # Store the losses.
             self._accumulate_loss_metrics(
                 metrics,

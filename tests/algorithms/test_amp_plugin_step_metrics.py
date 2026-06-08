@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -52,3 +53,8 @@ def test_amp_plugin_inserts_reward_components_as_step_metrics() -> None:
     inserted_current, inserted_next = plugin.amp_storage.inserted
     assert torch.equal(inserted_current, torch.tensor([[1.0, 1.5], [2.0, 2.5]]))
     assert torch.equal(inserted_next, torch.tensor([[3.0, 3.5], [2.0, 2.5]]))
+
+
+def test_amp_plugin_rejects_legacy_policy_std_clamp_config() -> None:
+    with pytest.raises(ValueError, match="min_policy_std"):
+        AMPPlugin(amp_reward_coef=1.0, amp_discr_hidden_dims=[8], min_normalized_std=0.05)
