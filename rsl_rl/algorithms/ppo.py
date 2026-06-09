@@ -395,12 +395,14 @@ class PPO:
             # Apply the gradients for PPO
             nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            for plugin in self.plugins:
+                plugin.on_per_batch_post_backward(self)
+
             self.optimizer.step()
 
-
-            # 让插件在 backward 后裁剪自有参数（如判别器）的梯度
+            # 让插件在参数更新后执行约束/投影等收尾逻辑
             for plugin in self.plugins:
-                plugin.on_post_backward(self)
+                plugin.on_per_batch_post_step(self)
             # Store the losses.
             self._accumulate_loss_metrics(
                 metrics,

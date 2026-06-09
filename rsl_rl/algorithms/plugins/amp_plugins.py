@@ -241,8 +241,10 @@ class AMPPlugin(PPOPlugin):
             "amp_grad_pen":   grad_pen,
         }
 
-    def on_post_backward(self, ppo) -> None:
+    def on_per_batch_post_backward(self, ppo) -> None:
         nn.utils.clip_grad_norm_(self.discriminator.parameters(), ppo.max_grad_norm)
+
+    def on_per_batch_post_step(self, ppo) -> None:
         if self.min_std is not None:
             self._clamp_policy_std(ppo)
 
