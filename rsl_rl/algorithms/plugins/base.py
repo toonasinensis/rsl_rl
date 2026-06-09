@@ -39,6 +39,8 @@ class PPOPlugin:
 
         ppo.save() / load():
             plugin.on_save(ppo, saved_dict) / on_load(ppo, loaded_dict)
+    
+    act -> step -> update_start -> per_batch_extra_loss -> post_backward -> post_update
     """
 
     def on_init(self, ppo: "PPO", env: "VecEnv") -> None:
