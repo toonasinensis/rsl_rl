@@ -5,6 +5,10 @@ researchers to prototype and test new ideas without the overhead of modifying la
 be used out-of-the-box by installing it via [PyPI](https://pypi.org/project/rsl-rl-lib/), supports multi-GPU training,
 and features common algorithms for robot learning.
 
+## TODO
+
+ - add Normalization layer synchronization mechanism for multi-GPU training
+
 ## Key Features
 
 - **Minimal, readable codebase** with clear extension points for rapid prototyping.

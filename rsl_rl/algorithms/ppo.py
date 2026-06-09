@@ -116,7 +116,7 @@ class PPO:
         self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
         # Compute the actions and values
         self.transition.actions = self.actor(obs, stochastic_output=True)["actions"].detach()
-        self.transition.values = self.critic(obs).detach()
+        self.transition.values = self.critic(obs)["actions"].detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
         # Record observations before env.step()
@@ -156,7 +156,7 @@ class PPO:
         """Compute return and advantage targets from stored transitions."""
         st = self.storage
         # Compute value for the last step
-        last_values = self.critic(obs).detach()
+        last_values = self.critic(obs)["actions"].detach()
         # Compute returns and advantages
         advantage = 0
         for step in reversed(range(st.num_transitions_per_env)):
@@ -250,7 +250,7 @@ class PPO:
             train_mode=True,
         )
         actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
-        values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
+        values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])["actions"]
         distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
         entropy = self.actor.output_entropy[:original_batch_size]
 
