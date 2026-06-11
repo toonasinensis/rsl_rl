@@ -206,6 +206,10 @@ class AMPPlugin(PPOPlugin):
         exp_ns = exp_ns.to(ppo.device)
 
         if self.amp_normalizer is not None:
+            self.amp_normalizer.update(pol_s.detach().cpu().numpy())
+            self.amp_normalizer.update(exp_s.detach().cpu().numpy())
+
+        if self.amp_normalizer is not None:
             with torch.no_grad():
                 pol_s = self.amp_normalizer.normalize_torch(pol_s, ppo.device)
                 pol_ns = self.amp_normalizer.normalize_torch(pol_ns, ppo.device)
@@ -226,19 +230,14 @@ class AMPPlugin(PPOPlugin):
             policy_d, expert_d, sample_amp_expert=(exp_s, exp_ns)
         )
 
-        # Mirror local amp_ppo: update normalizer per-batch from normalized states.
-        if self.amp_normalizer is not None:
-            self.amp_normalizer.update(pol_s.detach().cpu().numpy())
-            self.amp_normalizer.update(exp_s.detach().cpu().numpy())
-
         # Accumulate discriminator prediction stats for logging.
         self._policy_pred_sum += policy_d.detach().mean().item()
         self._expert_pred_sum += expert_d.detach().mean().item()
         self._pred_count += 1
 
         return {
-            "amp":  amp_loss,
-            "amp_grad_pen":   grad_pen,
+            "amp": self.amp_loss_coef * amp_loss,
+            "amp_grad_pen": grad_pen,
         }
 
     def on_per_batch_post_backward(self, ppo) -> None:
@@ -280,14 +279,14 @@ class AMPPlugin(PPOPlugin):
             "amp_expert_pred": self._expert_pred_sum / n,
         }
 
-    def _update_normalizer(self) -> None:
-        """更新 normalizer 的运行统计量，子类可覆盖以调整更新频率。"""
-        if self.amp_normalizer is not None and self.amp_storage is not None and self.amp_storage.num_samples > 0:
-            n = min(self.amp_storage.num_samples, 1024)
-            idxs = torch.randperm(self.amp_storage.num_samples)[:n]
-            states = self.amp_storage.states[idxs]
-            next_states = self.amp_storage.next_states[idxs]
-            self.amp_normalizer.update_with_tensors(states, next_states)
+    # def _update_normalizer(self) -> None:
+    #     """更新 normalizer 的运行统计量，子类可覆盖以调整更新频率。"""
+    #     if self.amp_normalizer is not None and self.amp_storage is not None and self.amp_storage.num_samples > 0:
+    #         n = min(self.amp_storage.num_samples, 1024)
+    #         idxs = torch.randperm(self.amp_storage.num_samples)[:n]
+    #         states = self.amp_storage.states[idxs]
+    #         next_states = self.amp_storage.next_states[idxs]
+    #         self.amp_normalizer.update_with_tensors(states, next_states)
 
     # ------------------------------------------------------------------
     # Train/eval mode
