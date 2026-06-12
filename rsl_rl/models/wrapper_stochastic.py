@@ -149,3 +149,8 @@ class StochasticWrapper(nn.Module):
         """Forward normalization-stat updates to the backbone."""
         if hasattr(self.backbone, "update_normalization"):
             self.backbone.update_normalization(obs)
+
+    def sync_normalization(self) -> None:
+        """Forward normalization-stat synchronization to the backbone."""
+        if hasattr(self.backbone, "sync_normalization"):
+            self.backbone.sync_normalization()

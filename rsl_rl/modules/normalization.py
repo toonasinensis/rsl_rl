@@ -29,8 +29,8 @@ class EmpiricalNormalization(nn.Module):
         self.eps = eps
         self.until = until
         self.register_buffer("_mean", torch.zeros(shape).unsqueeze(0))
-        self.register_buffer("_var", torch.ones(shape).unsqueeze(0))
-        self.register_buffer("_std", torch.ones(shape).unsqueeze(0))
+        self.register_buffer("_var",  torch.ones(shape).unsqueeze(0))
+        self.register_buffer("_std",  torch.ones(shape).unsqueeze(0))
         self.register_buffer("count", torch.tensor(0, dtype=torch.long))
 
     @property
@@ -64,6 +64,19 @@ class EmpiricalNormalization(nn.Module):
         self._mean += rate * delta_mean
         self._var += rate * (var_x - self._var + delta_mean * (mean_x - self._mean))
         self._std = torch.sqrt(self._var)
+
+    @torch.jit.unused
+    def sync_running_stats(self) -> None:
+        """Synchronize running mean and std across distributed processes by averaging."""
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return
+
+        world_size = torch.distributed.get_world_size()
+        torch.distributed.all_reduce(self._mean, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(self._std, op=torch.distributed.ReduceOp.SUM)
+        self._mean.div_(world_size)
+        self._std.div_(world_size)
+        self._var.copy_(self._std.square())
 
     @torch.jit.unused
     def inverse(self, y: torch.Tensor) -> torch.Tensor:
@@ -105,6 +118,10 @@ class EmpiricalDiscountedVariationNormalization(nn.Module):
             return rew / self.emp_norm._std  # type: ignore
         else:
             return rew
+
+    def sync_running_stats(self) -> None:
+        """Synchronize underlying empirical normalizer statistics across ranks."""
+        self.emp_norm.sync_running_stats()
 
 
 class _DiscountedAverage:

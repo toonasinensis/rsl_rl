@@ -123,6 +123,9 @@ class Distillation:
         loss = 0
         cnt = 0
 
+        if self.is_multi_gpu and hasattr(self.student, "sync_normalization"):
+            self.student.sync_normalization()
+
         for epoch in range(self.num_learning_epochs):
             self.student.reset(hidden_state=self.last_hidden_states[0])
             self.teacher.reset(hidden_state=self.last_hidden_states[1])

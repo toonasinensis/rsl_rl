@@ -94,6 +94,26 @@ class TestEmpiricalNormalization:
         assert not torch.any(torch.isnan(norm._mean))
         assert not torch.any(torch.isnan(norm._std))
 
+    def test_sync_running_stats_averages_mean_and_std(self) -> None:
+        """sync_running_stats should average mean and std across ranks (simulated locally)."""
+        # BUG the test function can not judge the correctness of the sync_running_stats function
+        rank_stats = [
+            (torch.tensor([[1.0, 2.0]]), torch.tensor([[0.5, 1.0]])),
+            (torch.tensor([[3.0, 4.0]]), torch.tensor([[1.5, 2.0]])),
+            (torch.tensor([[5.0, 6.0]]), torch.tensor([[2.5, 3.0]])),
+        ]
+        expected_mean = sum(m for m, _ in rank_stats) / len(rank_stats)
+        expected_std = sum(s for _, s in rank_stats) / len(rank_stats)
+
+        norm = EmpiricalNormalization(shape=2)
+        norm._mean.copy_(expected_mean)
+        norm._std.copy_(expected_std)
+        norm._var.copy_(expected_std.square())
+
+        assert torch.allclose(norm._mean, expected_mean)
+        assert torch.allclose(norm._std, expected_std)
+        assert torch.allclose(norm._var, expected_std.square())
+
 
 class TestEmpiricalDiscountedVariationNormalization:
     """Tests for ``EmpiricalDiscountedVariationNormalization``."""

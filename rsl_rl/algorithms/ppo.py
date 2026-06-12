@@ -360,6 +360,9 @@ class PPO:
         for plugin in self.plugins:
             plugin.on_update_start(self)
 
+        if self.is_multi_gpu:
+            self._sync_normalization()
+
         # Iterate over batches
         for batch in generator:
             original_batch_size = batch.observations.batch_size[0]
@@ -521,6 +524,13 @@ class PPO:
             plugin.on_init(alg, env)
 
         return alg
+
+    def _sync_normalization(self) -> None:
+        """Synchronize observation normalizer statistics across all GPUs."""
+        if hasattr(self.actor, "sync_normalization"):
+            self.actor.sync_normalization()
+        if hasattr(self.critic, "sync_normalization"):
+            self.critic.sync_normalization()
 
     def broadcast_parameters(self) -> None:
         """Broadcast model parameters to all GPUs."""

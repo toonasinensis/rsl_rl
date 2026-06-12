@@ -91,6 +91,12 @@ class BaseModel(nn.Module):
             for g in self.obs_groups:
                 self.obs_normalizers[g].update(obs[g])
 
+    def sync_normalization(self) -> None:
+        """Synchronize running normalisation statistics across distributed ranks."""
+        if self.obs_normalizers is not None:
+            for normalizer in self.obs_normalizers.values():
+                normalizer.sync_running_stats()
+
     def _get_obs_dim(self, obs: TensorDict, obs_groups: dict[str, list[str]], obs_set: str) -> tuple[list[str], dict]:
         """Select active observation groups and compute observation dimension."""
         active_obs_groups = obs_groups[obs_set]
