@@ -141,6 +141,7 @@ class GaussianDistribution(Distribution):
         output_dim: int,
         init_std: float = 1.0,
         std_type: str = "scalar",
+        learnable_std: bool = True,
     ) -> None:
         """Initialize the Gaussian distribution module.
 
@@ -148,15 +149,24 @@ class GaussianDistribution(Distribution):
             output_dim: Dimension of the action/output space.
             init_std: Initial standard deviation.
             std_type: Parameterization of the standard deviation: "scalar" or "log".
+            learnable_std: Whether the state-independent standard deviation is trainable.
         """
         super().__init__(output_dim)
         self.std_type = std_type
+        self.learnable_std = bool(learnable_std)
 
-        # Learnable std parameters
         if std_type == "scalar":
-            self.std_param = nn.Parameter(init_std * torch.ones(output_dim))
+            std = init_std * torch.ones(output_dim)
+            if self.learnable_std:
+                self.std_param = nn.Parameter(std)
+            else:
+                self.register_buffer("std_param", std)
         elif std_type == "log":
-            self.log_std_param = nn.Parameter(torch.log(init_std * torch.ones(output_dim)))
+            log_std = torch.log(init_std * torch.ones(output_dim))
+            if self.learnable_std:
+                self.log_std_param = nn.Parameter(log_std)
+            else:
+                self.register_buffer("log_std_param", log_std)
         else:
             raise ValueError(f"Unknown standard deviation type: {std_type}. Should be 'scalar' or 'log'.")
 

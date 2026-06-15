@@ -68,6 +68,7 @@ class Distillation:
         self.storage = storage
         self.transition = RolloutStorage.Transition()
         self.last_hidden_states = (None, None)
+        self.plugins: list = []
 
         # Distillation parameters
         self.num_learning_epochs = num_learning_epochs
@@ -87,11 +88,27 @@ class Distillation:
 
         self.num_updates = 0
 
+    @staticmethod
+    def _extract_actions(output: torch.Tensor | dict) -> torch.Tensor:
+        if isinstance(output, torch.Tensor):
+            return output
+        if isinstance(output, dict):
+            return output["actions"]
+        raise TypeError(f"Model output must be a Tensor or dict, got {type(output)!r}.")
+
+    @classmethod
+    def _forward_actions(cls, model: nn.Module, obs: TensorDict, stochastic_output: bool = False) -> torch.Tensor:
+        try:
+            output = model(obs, stochastic_output=stochastic_output)
+        except TypeError:
+            output = model(obs)
+        return cls._extract_actions(output)
+
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Sample actions and store transition data."""
         # Compute the actions
-        self.transition.actions = self.student(obs, stochastic_output=True).detach()
-        self.transition.privileged_actions = self.teacher(obs).detach()
+        self.transition.actions = self._forward_actions(self.student, obs, stochastic_output=True).detach()
+        self.transition.privileged_actions = self._forward_actions(self.teacher, obs).detach()
         # Record the observations
         self.transition.observations = obs
         return self.transition.actions  # type: ignore
@@ -129,7 +146,7 @@ class Distillation:
             self.student.detach_hidden_state()
             for batch in self.storage.generator():
                 # Inference of the student for gradient computation
-                actions = self.student(batch.observations)
+                actions = self._forward_actions(self.student, batch.observations)
 
                 # Behavior cloning loss
                 behavior_loss = self.loss_fn(actions, batch.privileged_actions)

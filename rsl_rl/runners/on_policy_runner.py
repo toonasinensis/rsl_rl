@@ -84,7 +84,7 @@ class OnPolicyRunner:
                     # Sample actions
                     actions = self.alg.act(obs)
                     # rollout hook: 让插件在 act 之后、env.step 之前保存跨步观测（如 AMP 的当前帧）
-                    for plugin in self.alg.plugins:
+                    for plugin in getattr(self.alg, "plugins", ()):
                         plugin.on_after_act(self, obs)
                     # Step the environment
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
@@ -94,7 +94,7 @@ class OnPolicyRunner:
                     # Move to device
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
                     # post-step hook: 插件可修改 rewards（如 AMP 判别器奖励替换任务奖励）
-                    for plugin in self.alg.plugins:
+                    for plugin in getattr(self.alg, "plugins", ()):
                         rewards = plugin.on_after_step(self, obs, rewards, dones, extras)
 
                     self.alg.process_env_step(obs, rewards, dones, extras)
@@ -125,8 +125,8 @@ class OnPolicyRunner:
                 learn_time=learn_time,
                 loss_dict=loss_dict,
                 learning_rate=self.alg.learning_rate,
-                action_std=self.alg.get_policy().output_std,
-                rnd_weight=self.alg.rnd.weight if self.cfg.get("algorithm", {}).get("rnd_cfg") else None,
+                action_std=getattr(self.alg.get_policy(), "output_std", None),
+                rnd_weight=getattr(getattr(self.alg, "rnd", None), "weight", None),
             )
 
             # Save model

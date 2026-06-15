@@ -56,6 +56,8 @@ class Model_Base(nn.Module):
             obs_normed = obs.clone()  # [FIX 2] 不改原始 TensorDict，避免 actor/critic 共享 obs 时互相污染
             for g in self.obs_groups:
                 obs_normed[g] = self.obs_normalizers[g](obs[g])
+        else:
+            obs_normed = obs
         return obs_normed
 
     def _compute_aux_losses(

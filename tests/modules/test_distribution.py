@@ -96,6 +96,19 @@ class TestGaussianDistribution:
         assert mean.grad is not None, "Gradient should flow from log_prob to mean"
         assert not torch.all(mean.grad == 0), "Gradient should be non-zero"
 
+    def test_fixed_std_is_registered_as_buffer(self) -> None:
+        """Fixed std should not appear in trainable parameters."""
+        dim = 3
+        dist = GaussianDistribution(output_dim=dim, init_std=0.22, std_type="scalar", learnable_std=False)
+
+        assert "std_param" not in dict(dist.named_parameters())
+        assert "std_param" in dict(dist.named_buffers())
+
+        mean = torch.zeros(2, dim)
+        dist.update(mean)
+
+        assert torch.allclose(dist.std, torch.full_like(mean, 0.22))
+
 
 class TestHeteroscedasticGaussianDistribution:
     """Tests for ``HeteroscedasticGaussianDistribution``."""

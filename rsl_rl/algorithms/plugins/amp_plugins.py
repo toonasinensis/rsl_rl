@@ -79,6 +79,11 @@ class AMPPlugin(PPOPlugin):
     # ------------------------------------------------------------------
 
     def on_init(self, ppo, env) -> None:
+        if self.amp_motion_files is None:
+            raise ValueError("AMPPlugin requires 'amp_motion_files' to point to expert motion npz data.")
+        if not self.amp_body_names:
+            raise ValueError("AMPPlugin requires non-empty 'amp_body_names'.")
+
         robot = env.unwrapped.scene["robot"]
         all_body_names = list(robot.body_names)
 
@@ -191,6 +196,15 @@ class AMPPlugin(PPOPlugin):
     # ------------------------------------------------------------------
 
     def on_update_start(self, ppo) -> None:
+        if self.amp_storage is None or self.amp_data is None:
+            self.amp_policy_generator = None
+            self.amp_expert_generator = None
+            return
+        if self.amp_storage.num_samples <= 0:
+            self.amp_policy_generator = None
+            self.amp_expert_generator = None
+            return
+
         n = ppo.num_learning_epochs * ppo.num_mini_batches
         bs = ppo.storage.num_envs * ppo.storage.num_transitions_per_env // ppo.num_mini_batches
         self.amp_policy_generator = self.amp_storage.feed_forward_generator(n, bs)
@@ -200,6 +214,11 @@ class AMPPlugin(PPOPlugin):
         self._pred_count = 0
 
     def on_per_batch_extra_loss(self, ppo, _batch) -> dict[str, torch.Tensor]:
+        if self.amp_policy_generator is None or self.amp_expert_generator is None:
+            return {}
+        if self.discriminator is None:
+            return {}
+
         pol_s, pol_ns = next(self.amp_policy_generator)
         exp_s, exp_ns = next(self.amp_expert_generator)
 
@@ -207,6 +226,11 @@ class AMPPlugin(PPOPlugin):
         pol_ns = pol_ns.to(ppo.device)
         exp_s = exp_s.to(ppo.device)
         exp_ns = exp_ns.to(ppo.device)
+
+        pol_s_raw = pol_s
+        pol_ns_raw = pol_ns
+        exp_s_raw = exp_s
+        exp_ns_raw = exp_ns
 
         if self.amp_normalizer is not None:
             with torch.no_grad():
@@ -229,10 +253,14 @@ class AMPPlugin(PPOPlugin):
             policy_d, expert_d, sample_amp_expert=(exp_s, exp_ns)
         )
 
-        # Mirror local amp_ppo: update normalizer per-batch from normalized states.
+        # Mirror local amp_ppo: update running stats from raw states after using current stats.
         if self.amp_normalizer is not None:
-            self.amp_normalizer.update(pol_s.detach().cpu().numpy())
-            self.amp_normalizer.update(exp_s.detach().cpu().numpy())
+            self.amp_normalizer.update_with_tensors(
+                pol_s_raw.detach(),
+                pol_ns_raw.detach(),
+                exp_s_raw.detach(),
+                exp_ns_raw.detach(),
+            )
 
         # Accumulate discriminator prediction stats for logging.
         self._policy_pred_sum += policy_d.detach().mean().item()
@@ -240,8 +268,8 @@ class AMPPlugin(PPOPlugin):
         self._pred_count += 1
 
         return {
-            "amp":  amp_loss,
-            "amp_grad_pen":   grad_pen,
+            "amp": self.amp_loss_coef * amp_loss,
+            "amp_grad_pen": self.amp_loss_coef * grad_pen,
         }
 
     def on_post_backward(self, ppo) -> None:

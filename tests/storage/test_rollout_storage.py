@@ -63,6 +63,17 @@ def _fill_with_identifiable_data(storage: RolloutStorage, obs: TensorDict) -> di
 class TestMiniBatchGenerator:
     """Tests for ``mini_batch_generator`` data completeness."""
 
+    def test_dict_access_matches_attribute_access(self) -> None:
+        """Storage and batches should expose the same fields by key and attribute."""
+        storage, obs = _make_storage_and_obs()
+        _fill_with_identifiable_data(storage, obs)
+
+        assert torch.equal(storage["actions"], storage.actions)
+
+        batch = next(storage.mini_batch_generator(2, num_epochs=1))
+        assert torch.equal(batch["actions"], batch.actions)
+        assert torch.equal(batch["values"], batch.values)
+
     def test_all_transitions_visited_in_one_epoch(self) -> None:
         """Every transition should appear exactly once in a single epoch."""
         storage, obs = _make_storage_and_obs()
@@ -237,6 +248,27 @@ class TestRecurrentMiniBatchGenerator:
 
 class TestDistillationStorage:
     """Tests for distillation-mode storage."""
+
+    def test_add_transition_lazily_allocates_extra_fields(self) -> None:
+        """New transition keys should create rollout fields without constructor changes."""
+        obs = make_obs(NUM_ENVS, OBS_DIM)
+        storage = RolloutStorage("distillation", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+
+        for step in range(NUM_STEPS):
+            t = RolloutStorage.Transition()
+            t.observations = obs
+            t.hidden_states = (None, None)
+            t.actions = torch.randn(NUM_ENVS, NUM_ACTIONS)
+            t.privileged_actions = torch.randn(NUM_ENVS, NUM_ACTIONS)
+            t.latent_actions = torch.full((NUM_ENVS, 2), float(step))
+            t.rewards = torch.randn(NUM_ENVS)
+            t.dones = torch.zeros(NUM_ENVS)
+            storage.add_transition(t)
+
+        assert "latent_actions" in storage
+        assert storage["latent_actions"].shape == (NUM_STEPS, NUM_ENVS, 2)
+        batch = next(storage.generator())
+        assert torch.equal(batch["latent_actions"], batch.latent_actions)
 
     def test_generator_yields_per_timestep_batches(self) -> None:
         """Distillation generator should yield one batch per timestep."""

@@ -168,7 +168,7 @@ class Logger:
         learn_time: float,
         loss_dict: dict,
         learning_rate: float,
-        action_std: torch.Tensor,
+        action_std: torch.Tensor | None,
         rnd_weight: float | None,
         print_minimal: bool = False,
         width: int = 80,
@@ -213,8 +213,9 @@ class Logger:
                 self.writer.add_scalar(f"Loss/{key}", value, it)
             self.writer.add_scalar("Loss/learning_rate", learning_rate, it)
 
-            # Log std
-            self.writer.add_scalar("Policy/mean_std", action_std.mean().item(), it)
+            # Log std when the algorithm exposes a stochastic policy distribution.
+            if action_std is not None:
+                self.writer.add_scalar("Policy/mean_std", action_std.mean().item(), it)
 
             # Log performance
             fps = int(collection_size / (collect_time + learn_time))
@@ -268,7 +269,8 @@ class Logger:
                 log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
 
             # Print std
-            log_string += f"""{"Mean action std:":>{pad}} {action_std.mean().item():.2f}\n"""
+            if action_std is not None:
+                log_string += f"""{"Mean action std:":>{pad}} {action_std.mean().item():.2f}\n"""
 
             # Print episode extras
             if not print_minimal:

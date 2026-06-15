@@ -224,6 +224,7 @@ def construct_actor_with_shell(
     obs_groups: dict[str, list[str]],
     cfg: dict,
     num_actions: int,
+    obs_set: str = "actor",
 ) -> Any:
     """Build actor as backbone + ActorModel shell.
 
@@ -252,12 +253,12 @@ def construct_actor_with_shell(
             backbone = backbone_class(
                 obs,
                 obs_groups,
-                "actor",
+                obs_set,
                 backbone_output_dim,
                 **backbone_cfg,
             )
         except TypeError:
-            backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, **backbone_cfg)
+            backbone = backbone_class(obs, obs_groups, obs_set, backbone_output_dim, **backbone_cfg)
 
         return actor_cls(backbone, num_actions, distribution_cfg=distribution_cfg)
 
@@ -273,9 +274,9 @@ def construct_actor_with_shell(
     if backbone_output_dim is None:
         backbone_output_dim = resolve_actor_backbone_output_dim(num_actions, distribution_cfg)
     try:
-        backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, distribution_cfg=None, **actor_cfg)
+        backbone = backbone_class(obs, obs_groups, obs_set, backbone_output_dim, distribution_cfg=None, **actor_cfg)
     except TypeError:
-        backbone = backbone_class(obs, obs_groups, "actor", backbone_output_dim, **actor_cfg)
+        backbone = backbone_class(obs, obs_groups, obs_set, backbone_output_dim, **actor_cfg)
 
     actor_model_cls = _resolve_class_or_raise("rsl_rl.models:ActorModel", "actor shell class")
     return actor_model_cls(backbone, num_actions, distribution_cfg=distribution_cfg)

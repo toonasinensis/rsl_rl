@@ -7,6 +7,7 @@
 
 from .actor_model import ActorModel
 from .cnn_model import CNNModel
+from .latent_vib_model import LatentVIBModel
 from .mlp_model import MLPModel
 from .rnn_model import RNNModel
 from .model_base import Model_Base
@@ -15,6 +16,7 @@ from .my_mlp_model import MyMLPModel
 __all__ = [
     "ActorModel",
     "CNNModel",
+    "LatentVIBModel",
     "MLPModel",
     "RNNModel",
     "MyModel",

@@ -373,6 +373,8 @@ class PPO:
         dist = getattr(self.actor, "distribution", None)
         if dist is None:
             return
+        if not getattr(dist, "learnable_std", True):
+            return
 
         with torch.no_grad():
             std_type = getattr(dist, "std_type", None)

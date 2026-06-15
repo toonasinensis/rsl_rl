@@ -7,69 +7,96 @@
 from __future__ import annotations
 
 import torch
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from tensordict import TensorDict
 
 from rsl_rl.modules import HiddenState
 from rsl_rl.utils import split_and_pad_trajectories
 
 
-class RolloutStorage:
-    """Storage for the data collected during a rollout.
+class _Record:
+    """Small mapping wrapper that also supports attribute access.
 
-    The rollout storage is populated by adding transitions during the rollout phase. It then returns a generator for
-    learning, depending on the algorithm and the policy architecture.
+    New code should prefer ``record["field"]`` while existing algorithm code can
+    continue to use ``record.field`` during the gradual storage migration.
     """
 
-    class Transition:
-        """Storage for a single state transition.
+    def __init__(self, include_none: bool = True, **fields) -> None:
+        object.__setattr__(self, "_data", {})
+        for key, value in fields.items():
+            if include_none or value is not None:
+                self._data[key] = value
 
-        This class is populated incrementally during the rollout phase and then passed to
-        :meth:`RolloutStorage.add_transition` to record the data.
-        """
+    def __getitem__(self, key: str):
+        return self._data[key]
+
+    def __setitem__(self, key: str, value) -> None:
+        self._data[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getattribute__(self, name: str):
+        if not name.startswith("_"):
+            try:
+                data = object.__getattribute__(self, "_data")
+            except AttributeError:
+                data = None
+            if data is not None and name in data:
+                return data[name]
+        return object.__getattribute__(self, name)
+
+    def __getattr__(self, name: str):
+        try:
+            return self._data[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            self._data[name] = value
+
+    def get(self, key: str, default=None):
+        return self._data.get(key, default)
+
+    def items(self):
+        return self._data.items()
+
+    def keys(self):
+        return self._data.keys()
+
+    def values(self):
+        return self._data.values()
+
+    def clear(self) -> None:
+        self._data.clear()
+
+
+class RolloutStorage:
+    """Storage for rollout data with dict-backed tensor fields.
+
+    The public compatibility attributes (for example ``storage.actions`` and
+    ``batch.actions``) are aliases over mapping entries. New algorithm code can
+    register and consume arbitrary tensor fields via mapping keys.
+    """
+
+    class Transition(_Record):
+        """Storage for one environment transition before insertion."""
 
         def __init__(self) -> None:
-            """Initialize an empty transition container."""
-            self.observations: TensorDict | None = None
-            """Observations at the current step."""
+            super().__init__(include_none=False)
+            self.hidden_states = (None, None)
 
-            self.actions: torch.Tensor | None = None
-            """Actions taken at the current step."""
-
-            self.rewards: torch.Tensor | None = None
-            """Rewards received after the action."""
-
-            self.dones: torch.Tensor | None = None
-            """Done flags indicating episode termination."""
-
-            # For reinforcement learning
-            self.values: torch.Tensor | None = None
-            """Value estimates at the current step (RL only)."""
-
-            self.actions_log_prob: torch.Tensor | None = None
-            """Log probability of the taken actions (RL only)."""
-
-            self.distribution_params: tuple[torch.Tensor, ...] | None = None
-            """Parameters of the action distribution (RL only)."""
-
-            # For distillation
-            self.privileged_actions: torch.Tensor | None = None
-            """Privileged (teacher) actions (distillation only)."""
-
-            # For recurrent networks
-            self.hidden_states: tuple[HiddenState, HiddenState] = (None, None)
-            """Hidden states for recurrent networks, e.g., (actor, critic)."""
-
-        def clear(self) -> None:
-            """Reset all transition fields to None."""
-            self.__init__()
-
-    class Batch:
-        """A batch of data yielded by the rollout storage generators.
-
-        This class provides named access to mini-batch fields. Fields are optional to support different training modes
-        (RL vs distillation) and architectures (feedforward vs recurrent).
-        """
+    class Batch(_Record):
+        """A mini-batch yielded by storage generators."""
 
         def __init__(
             self,
@@ -84,43 +111,23 @@ class RolloutStorage:
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
+            **extra_fields,
         ) -> None:
-            """Initialize a batch container over rollout data."""
-            self.observations: TensorDict | None = observations
-            """Batch of observations."""
-
-            # For reinforcement learning
-            self.actions: torch.Tensor | None = actions
-            """Batch of actions."""
-
-            self.values: torch.Tensor | None = values
-            """Batch of value estimates (RL only)."""
-
-            self.advantages: torch.Tensor | None = advantages
-            """Batch of advantage estimates (RL only)."""
-
-            self.returns: torch.Tensor | None = returns
-            """Batch of return targets (RL only)."""
-
-            self.old_actions_log_prob: torch.Tensor | None = old_actions_log_prob
-            """Batch of log probabilities of the old actions (RL only)."""
-
-            self.old_distribution_params: tuple[torch.Tensor, ...] | None = old_distribution_params
-            """Batch of parameters of the old action distribution (RL only)."""
-
-            # For distillation
-            self.privileged_actions: torch.Tensor | None = privileged_actions
-            """Batch of privileged (teacher) actions (distillation only)."""
-
-            self.dones: torch.Tensor | None = dones
-            """Batch of done flags (distillation only)."""
-
-            # For recurrent networks
-            self.hidden_states: tuple[HiddenState, HiddenState] = hidden_states
-            """Batch of hidden states for recurrent networks (RL recurrent only)."""
-
-            self.masks: torch.Tensor | None = masks
-            """Batch of trajectory masks for recurrent networks (RL recurrent only)."""
+            super().__init__(
+                include_none=True,
+                observations=observations,
+                actions=actions,
+                values=values,
+                advantages=advantages,
+                returns=returns,
+                old_actions_log_prob=old_actions_log_prob,
+                old_distribution_params=old_distribution_params,
+                hidden_states=hidden_states,
+                masks=masks,
+                privileged_actions=privileged_actions,
+                dones=dones,
+                **extra_fields,
+            )
 
     def __init__(
         self,
@@ -132,93 +139,182 @@ class RolloutStorage:
         device: str = "cpu",
     ) -> None:
         """Allocate rollout buffers for a specific training mode and batch shape."""
-        self.training_type = training_type
-        self.device = device
-        self.num_transitions_per_env = num_transitions_per_env
-        self.num_envs = num_envs
-        self.actions_shape = actions_shape
+        object.__setattr__(self, "training_type", training_type)
+        object.__setattr__(self, "device", device)
+        object.__setattr__(self, "num_transitions_per_env", num_transitions_per_env)
+        object.__setattr__(self, "num_envs", num_envs)
+        object.__setattr__(self, "actions_shape", tuple(actions_shape))
 
-        # Core
-        self.observations = TensorDict(
+        data = TensorDict({}, batch_size=[num_transitions_per_env, num_envs], device=device)
+        data["observations"] = TensorDict(
             {key: torch.zeros(num_transitions_per_env, *value.shape, device=device) for key, value in obs.items()},
             batch_size=[num_transitions_per_env, num_envs],
+            device=device,
+        )
+        object.__setattr__(self, "data", data)
+        object.__setattr__(self, "_tuple_data", {})
+
+        self.ensure_field("rewards", (1,))
+        self.ensure_field("dones", (1,), dtype=torch.uint8)
+        self.ensure_field("actions", tuple(actions_shape))
+
+        if training_type == "distillation":
+            self.ensure_field("privileged_actions", tuple(actions_shape))
+        elif training_type == "rl":
+            self.ensure_field("values", (1,))
+            self.ensure_field("actions_log_prob", (1,))
+            self.ensure_field("returns", (1,))
+            self.ensure_field("advantages", (1,))
+
+        object.__setattr__(self, "saved_hidden_state_a", None)
+        object.__setattr__(self, "saved_hidden_state_c", None)
+        object.__setattr__(self, "step", 0)
+
+    def __getitem__(self, key: str):
+        return self.data[key]
+
+    def __setitem__(self, key: str, value) -> None:
+        self.data[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.data.keys() or key in self._tuple_data
+
+    def __getattr__(self, name: str):
+        if "data" in self.__dict__ and name in self.data.keys():
+            return self.data[name]
+        if "_tuple_data" in self.__dict__ and name in self._tuple_data:
+            return self._tuple_data[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in {
+            "training_type",
+            "device",
+            "num_transitions_per_env",
+            "num_envs",
+            "actions_shape",
+            "data",
+            "_tuple_data",
+            "saved_hidden_state_a",
+            "saved_hidden_state_c",
+            "step",
+        }:
+            object.__setattr__(self, name, value)
+        elif "data" in self.__dict__ and name in self.data.keys():
+            self.data[name] = value
+        elif "_tuple_data" in self.__dict__ and name in self._tuple_data:
+            self._tuple_data[name] = value
+        else:
+            object.__setattr__(self, name, value)
+
+    def ensure_field(
+        self,
+        name: str,
+        shape: Iterable[int] | torch.Size,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Allocate a rollout tensor field if it does not already exist."""
+        if name in self.data.keys():
+            return self.data[name]
+        field_shape = tuple(shape)
+        self.data[name] = torch.zeros(
+            self.num_transitions_per_env,
+            self.num_envs,
+            *field_shape,
+            dtype=dtype,
             device=self.device,
         )
-        self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
+        return self.data[name]
 
-        # For distillation
-        if training_type == "distillation":
-            self.privileged_actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+    def _ensure_field_from_value(self, name: str, value) -> None:
+        """Lazy-allocate a field that matches a transition value."""
+        if name in self.data.keys():
+            return
+        if isinstance(value, TensorDict):
+            self.data[name] = TensorDict(
+                {
+                    key: torch.zeros(
+                        self.num_transitions_per_env,
+                        *tensor.shape,
+                        dtype=tensor.dtype,
+                        device=self.device,
+                    )
+                    for key, tensor in value.items()
+                },
+                batch_size=[self.num_transitions_per_env, *value.batch_size],
+                device=self.device,
+            )
+        elif isinstance(value, torch.Tensor):
+            self.data[name] = torch.zeros(
+                self.num_transitions_per_env,
+                *value.shape,
+                dtype=value.dtype,
+                device=self.device,
+            )
+        else:
+            raise TypeError(f"Unsupported rollout field type for {name!r}: {type(value)!r}")
 
-        # For reinforcement learning
-        if training_type == "rl":
-            self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-            self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-            self.distribution_params: tuple[torch.Tensor, ...] | None = None  # Lazily initialized on first transition
-            self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-            self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+    @staticmethod
+    def _reshape_for_target(value: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if value.shape == target.shape:
+            return value
+        return value.reshape_as(target)
 
-        # For recurrent networks
-        self.saved_hidden_state_a = None
-        self.saved_hidden_state_c = None
+    def _copy_field(self, name: str, value) -> None:
+        self._ensure_field_from_value(name, value)
+        target = self.data[name][self.step]
+        if isinstance(value, TensorDict):
+            target.copy_(value)
+        else:
+            target.copy_(self._reshape_for_target(value, target))
 
-        # Counter for the number of transitions stored
-        self.step = 0
+    def _copy_tuple_field(self, name: str, values: tuple[torch.Tensor, ...]) -> None:
+        if name not in self._tuple_data:
+            self._tuple_data[name] = tuple(
+                torch.zeros(self.num_transitions_per_env, *value.shape, dtype=value.dtype, device=self.device)
+                for value in values
+            )
+        if len(self._tuple_data[name]) != len(values):
+            raise ValueError(
+                f"Tuple rollout field {name!r} changed length from {len(self._tuple_data[name])} to {len(values)}."
+            )
+        for target, value in zip(self._tuple_data[name], values):
+            target[self.step].copy_(value)
 
     def add_transition(self, transition: Transition) -> None:
         """Add one transition to the storage at the current step index."""
-        # Check if the transition is valid
         if self.step >= self.num_transitions_per_env:
             raise OverflowError("Rollout buffer overflow! You should call clear() before adding new transitions.")
 
-        # Core
-        self.observations[self.step].copy_(transition.observations)
-        self.actions[self.step].copy_(transition.actions)  # type: ignore
-        self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
-        self.dones[self.step].copy_(transition.dones.view(-1, 1))
+        for name, value in transition.items():
+            if name == "hidden_states" or value is None:
+                continue
+            if isinstance(value, tuple):
+                self._copy_tuple_field(name, value)
+            else:
+                self._copy_field(name, value)
 
-        # For distillation
-        if self.training_type == "distillation":
-            self.privileged_actions[self.step].copy_(transition.privileged_actions)  # type: ignore
-
-        # For reinforcement learning
-        if self.training_type == "rl":
-            self.values[self.step].copy_(transition.values)  # type: ignore
-            self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
-            if self.distribution_params is None:  # Initialize the distribution parameters
-                self.distribution_params = tuple(
-                    torch.zeros(self.num_transitions_per_env, *p.shape, device=self.device)
-                    for p in transition.distribution_params  # type: ignore
-                )
-            for i, p in enumerate(transition.distribution_params):  # type: ignore
-                self.distribution_params[i][self.step].copy_(p)
-
-        # For RNN networks
-        self._save_hidden_states(transition.hidden_states)
-
-        # Increment the counter
+        self._save_hidden_states(transition.get("hidden_states", (None, None)))
         self.step += 1
 
     def clear(self) -> None:
         """Reset the write cursor for the next rollout."""
         self.step = 0
 
-    # For distillation
+    def _batch_at_step(self, step: int) -> Batch:
+        fields = {key: self.data[key][step] for key in self.data.keys()}
+        return RolloutStorage.Batch(**fields)
+
     def generator(self) -> Generator[Batch, None, None]:
         """Yield per-timestep batches for distillation training."""
         if self.training_type != "distillation":
             raise ValueError("This function is only available for distillation training.")
+        if "privileged_actions" not in self.data.keys():
+            raise ValueError("Distillation storage requires a 'privileged_actions' field.")
 
-        for i in range(self.num_transitions_per_env):
-            yield RolloutStorage.Batch(
-                observations=self.observations[i],  # type: ignore
-                privileged_actions=self.privileged_actions[i],
-                dones=self.dones[i],
-            )
+        for step in range(self.num_transitions_per_env):
+            yield self._batch_at_step(step)
 
-    # For reinforcement learning with feedforward networks
     def mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 8) -> Generator[Batch, None, None]:
         """Yield shuffled flat mini-batches for feedforward RL updates."""
         if self.training_type != "rl":
@@ -227,25 +323,22 @@ class RolloutStorage:
         mini_batch_size = batch_size // num_mini_batches
         indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
 
-        # Flatten the data
-        observations = self.observations.flatten(0, 1)
-        actions = self.actions.flatten(0, 1)
-        values = self.values.flatten(0, 1)
-        returns = self.returns.flatten(0, 1)
-        old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
-        advantages = self.advantages.flatten(0, 1)
-        old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
+        observations = self.data["observations"].flatten(0, 1)
+        actions = self.data["actions"].flatten(0, 1)
+        values = self.data["values"].flatten(0, 1)
+        returns = self.data["returns"].flatten(0, 1)
+        old_actions_log_prob = self.data["actions_log_prob"].flatten(0, 1)
+        advantages = self.data["advantages"].flatten(0, 1)
+        old_distribution_params = tuple(p.flatten(0, 1) for p in self._tuple_data["distribution_params"])
 
-        for epoch in range(num_epochs):
+        for _ in range(num_epochs):
             for i in range(num_mini_batches):
-                # Select the indices for the mini-batch
                 start = i * mini_batch_size
                 stop = (i + 1) * mini_batch_size
                 batch_idx = indices[start:stop]
 
-                # Yield the mini-batch
                 yield RolloutStorage.Batch(
-                    observations=observations[batch_idx],  # type: ignore
+                    observations=observations[batch_idx],
                     actions=actions[batch_idx],
                     values=values[batch_idx],
                     advantages=advantages[batch_idx],
@@ -254,36 +347,31 @@ class RolloutStorage:
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
                 )
 
-    # For reinforcement learning with recurrent networks
     def recurrent_mini_batch_generator(
         self, num_mini_batches: int, num_epochs: int = 8
     ) -> Generator[Batch, None, None]:
         """Yield trajectory mini-batches with masks and recurrent hidden states."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
-        padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
+        padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(
+            self.data["observations"], self.data["dones"]
+        )
         mini_batch_size = self.num_envs // num_mini_batches
 
-        for ep in range(num_epochs):
+        for _ in range(num_epochs):
             first_traj = 0
             for i in range(num_mini_batches):
-                # Select the indices for the mini-batch
                 start = i * mini_batch_size
                 stop = (i + 1) * mini_batch_size
 
-                dones = self.dones.squeeze(-1)
+                dones = self.data["dones"].squeeze(-1)
                 last_was_done = torch.zeros_like(dones, dtype=torch.bool)
                 last_was_done[1:] = dones[:-1]
                 last_was_done[0] = True
                 trajectories_batch_size = torch.sum(last_was_done[:, start:stop])
                 last_traj = first_traj + trajectories_batch_size
 
-                # Handle the hidden states
-                # Reshape to [num_envs, time, num layers, hidden dim]
-                # Original shape: [time, num_layers, num_envs, hidden_dim])
                 last_was_done = last_was_done.permute(1, 0)
-                # Take only time steps after dones (flattens num envs and time dimensions),
-                # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
                 if self.saved_hidden_state_a is not None:
                     hidden_state_a_batch = [
                         saved_hidden_state.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
@@ -291,7 +379,6 @@ class RolloutStorage:
                         .contiguous()
                         for saved_hidden_state in self.saved_hidden_state_a
                     ]
-                    # Remove the tuple for GRU
                     hidden_state_a_batch = (
                         hidden_state_a_batch[0] if len(hidden_state_a_batch) == 1 else hidden_state_a_batch
                     )
@@ -310,16 +397,17 @@ class RolloutStorage:
                 else:
                     hidden_state_c_batch = None
 
-                # Yield the mini-batch
                 yield RolloutStorage.Batch(
-                    observations=padded_obs_trajectories[:, first_traj:last_traj],  # type: ignore
-                    actions=self.actions[:, start:stop],
-                    values=self.values[:, start:stop],
-                    advantages=self.advantages[:, start:stop],
-                    returns=self.returns[:, start:stop],
-                    old_actions_log_prob=self.actions_log_prob[:, start:stop],
-                    old_distribution_params=tuple(p[:, start:stop] for p in self.distribution_params),  # type: ignore
-                    hidden_states=(hidden_state_a_batch, hidden_state_c_batch),  # type: ignore
+                    observations=padded_obs_trajectories[:, first_traj:last_traj],
+                    actions=self.data["actions"][:, start:stop],
+                    values=self.data["values"][:, start:stop],
+                    advantages=self.data["advantages"][:, start:stop],
+                    returns=self.data["returns"][:, start:stop],
+                    old_actions_log_prob=self.data["actions_log_prob"][:, start:stop],
+                    old_distribution_params=tuple(
+                        p[:, start:stop] for p in self._tuple_data["distribution_params"]
+                    ),
+                    hidden_states=(hidden_state_a_batch, hidden_state_c_batch),
                     masks=trajectory_masks[:, first_traj:last_traj],
                 )
 
@@ -329,26 +417,25 @@ class RolloutStorage:
         """Save recurrent hidden states to the rollout storage."""
         if hidden_states == (None, None):
             return
-        # Make a tuple out of GRU hidden states to match the LSTM format
         if hidden_states[0] is not None:
             hidden_state_a = hidden_states[0] if isinstance(hidden_states[0], tuple) else (hidden_states[0],)
         if hidden_states[1] is not None:
             hidden_state_c = hidden_states[1] if isinstance(hidden_states[1], tuple) else (hidden_states[1],)
-        # Initialize hidden states if needed
+
         if self.saved_hidden_state_a is None and hidden_states[0] is not None:
             self.saved_hidden_state_a = [
-                torch.zeros(self.observations.shape[0], *hidden_state_a[i].shape, device=self.device)
+                torch.zeros(self.data["observations"].shape[0], *hidden_state_a[i].shape, device=self.device)
                 for i in range(len(hidden_state_a))
             ]
         if self.saved_hidden_state_c is None and hidden_states[1] is not None:
             self.saved_hidden_state_c = [
-                torch.zeros(self.observations.shape[0], *hidden_state_c[i].shape, device=self.device)
+                torch.zeros(self.data["observations"].shape[0], *hidden_state_c[i].shape, device=self.device)
                 for i in range(len(hidden_state_c))
             ]
-        # Copy the states
+
         if hidden_states[0] is not None:
             for i in range(len(hidden_state_a)):
-                self.saved_hidden_state_a[i][self.step].copy_(hidden_state_a[i])  # type: ignore
+                self.saved_hidden_state_a[i][self.step].copy_(hidden_state_a[i])
         if hidden_states[1] is not None:
             for i in range(len(hidden_state_c)):
-                self.saved_hidden_state_c[i][self.step].copy_(hidden_state_c[i])  # type: ignore
+                self.saved_hidden_state_c[i][self.step].copy_(hidden_state_c[i])
