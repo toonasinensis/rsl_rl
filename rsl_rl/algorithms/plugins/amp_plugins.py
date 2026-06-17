@@ -113,7 +113,7 @@ class AMPPlugin(PPOPlugin):
         )
         # >>> AMP BODY ID DEBUG START
         print("\n========== AMP BODY ID DEBUG: LOADER ==========")
-        print("[AMPDBG] loader anchor index in AMP selected order:", self.amp_data._anchor_indexes)
+        print("[AMPDBG] loader anchor index in source motion:", self.amp_data._anchor_indexes)
         print("[AMPDBG] loader anchor name:", self.amp_data._anchor_name)
         print("[AMPDBG] loader body indexes in AMP selected order:", self.amp_data._body_indexes)
         print("[AMPDBG] loader body names:", self.amp_data._body_names)

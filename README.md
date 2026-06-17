@@ -1,55 +1,68 @@
-# RSL-RL
+# RSL-RL Plugin Branch
 
-**RSL-RL** is a GPU-accelerated, lightweight learning library for robotics research. Its compact design allows
-researchers to prototype and test new ideas without the overhead of modifying large, complex libraries. RSL-RL can also
-be used out-of-the-box by installing it via [PyPI](https://pypi.org/project/rsl-rl-lib/), supports multi-GPU training,
-and features common algorithms for robot learning.
+This branch reorganizes PPO extensions around a small plugin interface. The goal is to keep the core PPO loop clean while making research features easy to add, test, turn on, or remove from configuration.
 
-## Key Features
+[中文说明](README.zh-CN.md)
 
-- **Minimal, readable codebase** with clear extension points for rapid prototyping.
-- **Robotics-first methods** including PPO and Student-Teacher Distillation.
-- **High-throughput training** with native Multi-GPU support.
-- **Proven performance** in numerous research publications.
+## Why Plugins
 
-## Learning Environments
+- **Lower coupling:** extra rewards, losses, metrics, parameters, and checkpoint states live in plugins instead of being hard-coded into PPO.
+- **Configurable experiments:** plugins are created from `algorithm.plugins`, so different training recipes can share the same PPO implementation.
+- **Clear extension points:** hooks cover rollout, update, gradient clipping, train/eval mode, save, and load.
+- **Easier growth:** new methods can be added as new `PPOPlugin` subclasses without rewriting the runner or duplicating PPO.
 
-RSL-RL is currently used by the following robot learning libraries:
+## Included Plugins
 
-- [Isaac Lab](https://github.com/isaac-sim/IsaacLab) (built on top of NVIDIA Isaac Sim)
-- [Legged Gym](https://github.com/leggedrobotics/legged_gym) (built on top of NVIDIA Isaac Gym)
-- [mjlab](https://github.com/mujocolab/mjlab) (built on top of MuJoCo Warp)
-- [MuJoCo Playground](https://github.com/google-deepmind/mujoco_playground) (built on top of MuJoCo MJX and Warp)
+### AMPPlugin
+
+`AMPPlugin` integrates Adversarial Motion Priors into PPO. During rollout it stores AMP observations, computes discriminator-based rewards, and logs reward components. During update it trains the discriminator together with the policy through the plugin loss hooks.
+
+### TeacherKLPlugin
+
+`TeacherKLPlugin` adds a frozen teacher-policy KL loss for student policy training. It loads a teacher checkpoint, maps teacher observation groups when needed, applies a scheduled KL coefficient, and saves plugin progress in checkpoints.
+
+## Minimal Config Shape
+
+```python
+algorithm = {
+    "class_name": "PPO",
+    "plugins": [
+        {
+            "class_name": "AMPPlugin",
+            "amp_reward_coef": 2.0,
+            "amp_discr_hidden_dims": [1024, 512],
+            "amp_motion_files": "/path/to/motions",
+            "amp_body_names": ["pelvis", "left_foot", "right_foot"],
+            "amp_anchor_name": "pelvis",
+        },
+        {
+            "class_name": "TeacherKLPlugin",
+            "teacher_checkpoint_path": "/path/to/teacher.pt",
+            "teacher_actor": {...},
+            "teacher_obs_groups": {"actor": ["proprio"]},
+        },
+    ],
+}
+```
+
+Plugins are optional. Leave `algorithm.plugins` empty to run plain PPO.
 
 ## Installation
 
-Before installing RSL-RL, ensure that Python `3.9+` is available. It is recommended to install the library in a virtual
-environment (e.g. using `venv` or `conda`), which is often already created by the used environment library (e.g.
-Isaac Lab). If so, make sure to activate it before installing RSL-RL.
-
-### Installing RSL-RL as a dependency
-
 ```bash
-pip install rsl-rl-lib
-```
-
-### Installing RSL-RL for development
-
-```bash
-git clone https://github.com/leggedrobotics/rsl_rl
+git clone https://github.com/toonasinensis/rsl_rl.git
 cd rsl_rl
 pip install -e .
 ```
 
+## Tests
+
+```bash
+pytest tests/algorithms/test_amp_motion_loader.py \
+       tests/algorithms/test_amp_plugin_step_metrics.py \
+       tests/algorithms/test_teacher_kl_plugin.py
+```
+
 ## Citation
 
-If you use RSL-RL in your research, please cite the [paper](https://arxiv.org/abs/2509.10771):
-
-```text
-@article{schwarke2025rslrl,
-  title={RSL-RL: A Learning Library for Robotics Research},
-  author={Schwarke, Clemens and Mittal, Mayank and Rudin, Nikita and Hoeller, David and Hutter, Marco},
-  journal={arXiv preprint arXiv:2509.10771},
-  year={2025}
-}
-```
+This repository is based on RSL-RL. If you use it in research, please cite the original project.

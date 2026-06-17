@@ -45,6 +45,23 @@ def test_amp_loader_uses_npz_body_names(tmp_path) -> None:
     assert np.allclose(loader._body_pos_b_list[0][0, :, 0].cpu().numpy(), [0.0, 10.0])
 
 
+def test_amp_loader_allows_anchor_outside_selected_body_names_with_metadata(tmp_path) -> None:
+    path = tmp_path / "motion.npz"
+    _write_motion(path, body_names=["b3", "anchor", "b2"])
+
+    loader = AMPLoader(
+        str(path),
+        body_names=["b3", "b2"],
+        anchor_name="anchor",
+        all_body_names=["anchor", "b2", "b3"],
+        device="cpu",
+    )
+
+    assert loader.observation_dim == 30
+    assert np.allclose(loader._body_pos_b_list[0][0, :, 0].cpu().numpy(), [20.0, 10.0])
+    assert loader._anchor_indexes == 1
+
+
 def test_amp_loader_legacy_selected_order(tmp_path) -> None:
     path = tmp_path / "motion.npz"
     np.savez(

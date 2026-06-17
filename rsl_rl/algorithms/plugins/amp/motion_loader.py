@@ -54,8 +54,6 @@ def _resolve_amp_body_indexes(
 ) -> tuple[list[int], int, str]:
     npz_body_names = _read_name_list(raw, _BODY_NAME_KEYS)
     target_body_names = list(body_names)
-    if anchor_name not in target_body_names:
-        raise ValueError(f"AMP anchor_name '{anchor_name}' must be included in amp body_names: {target_body_names}")
 
     if npz_body_names is not None:
         if len(npz_body_names) != motion_body_count:
@@ -67,13 +65,18 @@ def _resolve_amp_body_indexes(
         anchor_index = _name_indexes(npz_body_names, [anchor_name], motion_path)[0]
         return body_indexes, anchor_index, "metadata"
 
-    if motion_body_count == len(target_body_names):
-        return list(range(len(target_body_names))), target_body_names.index(anchor_name), "legacy_selected"
-
     if motion_body_count == len(all_body_names):
         body_indexes = _name_indexes(all_body_names, target_body_names, motion_path)
         anchor_index = _name_indexes(all_body_names, [anchor_name], motion_path)[0]
         return body_indexes, anchor_index, "legacy_full_body"
+
+    if motion_body_count == len(target_body_names):
+        if anchor_name not in target_body_names:
+            raise ValueError(
+                f"{motion_path}: legacy selected AMP arrays do not include anchor_name '{anchor_name}'. "
+                "Add body_names metadata or export full-body arrays so the anchor can be resolved independently."
+            )
+        return list(range(len(target_body_names))), target_body_names.index(anchor_name), "legacy_selected"
 
     raise ValueError(
         f"{motion_path}: cannot map npz body dim {motion_body_count} to AMP body dim {len(target_body_names)}. "
@@ -105,7 +108,8 @@ class AMPLoader:
         self._body_names = body_names_list
         self._anchor_name = anchor_name
         self._body_indexes = list(range(len(body_names_list)))
-        self._anchor_indexes = body_names_list.index(anchor_name)
+        self._anchor_indexes = None
+        self._anchor_motion_indexes = []
         self._num_bodies = len(body_names_list)
 
         # 检查是文件还是文件夹
@@ -158,6 +162,9 @@ class AMPLoader:
                 anchor_name=anchor_name,
                 all_body_names=all_names_list,
             )
+            self._anchor_motion_indexes.append(anchor_index)
+            if self._anchor_indexes is None:
+                self._anchor_indexes = anchor_index
 
             # >>> AMP BODY ID DEBUG START
             if motion_idx == 0:
@@ -169,7 +176,7 @@ class AMPLoader:
                 print("[AMPDBG] runtime all_body_names count:", len(all_names_list))
                 print("[AMPDBG] amp body indexes in npz:", body_indexes)
                 print("[AMPDBG] amp body names:", body_names_list)
-                print("[AMPDBG] amp anchor index in npz:", anchor_index)
+                print("[AMPDBG] amp anchor index in source:", anchor_index)
                 print("[AMPDBG] amp anchor name:", anchor_name)
                 print("============================================\n")
             # <<< AMP BODY ID DEBUG END
